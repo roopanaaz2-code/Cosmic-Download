@@ -290,7 +290,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
           onReceiveProgress: (received, _) {
             receivedBySegment[index] = received;
             final allReceived = receivedBySegment.fold<int>(0, (sum, value) => sum + value);
-            item.progress = (allReceived / totalBytes).clamp(0.0, 1.0);
+            item.progress = (allReceived / totalBytes).clamp(0.0, 1.0).toDouble();
             if (mounted) setState(() {});
             notifications.show(item.notificationId, 'Cosmic Turbo Download', '${(item.progress * 100).round()}% • ${item.name}',
               NotificationDetails(android: AndroidNotificationDetails('cosmic_downloads', 'Downloads', channelDescription: 'Download progress and completion', importance: Importance.low, priority: Priority.low, showProgress: true, maxProgress: 100, progress: (item.progress * 100).round())));
