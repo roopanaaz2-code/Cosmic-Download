@@ -222,10 +222,11 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
       _tile(Icons.graphic_eq_rounded, 'MP3 converter', 'Coming in next engine update', () => _message('Audio extraction engine is scheduled for the next release.')),
     ]),
     const SizedBox(height: 16),
-    Container padding: const EdgeInsets.all(14), decoration: BoxDecoration(color: panel, borderRadius: BorderRadius.circular(16)),
-    const Text('Speed note', style: TextStyle(color: cyan, fontWeight: FontWeight.bold)),
-    const SizedBox(height: 5),
-    const Text('Cosmic Download uses direct HTTP downloads. Actual speed depends on your connection and the source server. Parallel acceleration and supported-site integrations will be added after compatibility testing.', style: TextStyle(color: Colors.white60, fontSize: 12, height: 1.4)),
+    Container(padding: const EdgeInsets.all(14), decoration: BoxDecoration(color: panel, borderRadius: BorderRadius.circular(16)), child: const Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Text('Speed note', style: TextStyle(color: cyan, fontWeight: FontWeight.bold)),
+      SizedBox(height: 5),
+      Text('Cosmic Download uses direct HTTP downloads. Actual speed depends on your connection and the source server. Parallel acceleration and supported-site integrations will be added after compatibility testing.', style: TextStyle(color: Colors.white60, fontSize: 12, height: 1.4)),
+    ])),
   ]);
 
   Widget _tile(IconData icon, String title, String subtitle, VoidCallback action) => InkWell(onTap: action, borderRadius: BorderRadius.circular(16), child: Container(padding: const EdgeInsets.all(13), decoration: BoxDecoration(color: panel, borderRadius: BorderRadius.circular(16), border: Border.all(color: Colors.white10)), child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisAlignment: MainAxisAlignment.center, children: [
@@ -260,8 +261,8 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     const SizedBox(height: 16), Text(playingName ?? 'Choose audio from your device', textAlign: TextAlign.center, style: const TextStyle(fontWeight: FontWeight.bold)),
     const SizedBox(height: 12), StreamBuilder<Duration?>(stream: audio.durationStream, builder: (context, snap) => StreamBuilder<Duration>(stream: audio.positionStream, builder: (context, pos) {
       final duration = snap.data ?? Duration.zero, position = pos.data ?? Duration.zero;
-      final max = duration.inMilliseconds.toDouble().clamp(1, double.infinity);
-      return Column(children: [Slider(value: position.inMilliseconds.toDouble().clamp(0, max), max: max, onChanged: (v) => audio.seek(Duration(milliseconds: v.round())), activeColor: cyan), Text('${_fmt(position)} / ${_fmt(duration)}', style: const TextStyle(color: Colors.white54, fontSize: 11))]);
+      final max = duration.inMilliseconds.toDouble().clamp(1.0, double.infinity).toDouble();
+      return Column(children: [Slider(value: position.inMilliseconds.toDouble().clamp(0.0, max).toDouble(), max: max, onChanged: (v) => audio.seek(Duration(milliseconds: v.round())), activeColor: cyan), Text('${_fmt(position)} / ${_fmt(duration)}', style: const TextStyle(color: Colors.white54, fontSize: 11))]);
     })),
     Row(mainAxisAlignment: MainAxisAlignment.center, children: [
       IconButton(onPressed: () => audio.seek(Duration.zero), icon: const Icon(Icons.replay_10)),
