@@ -12,7 +12,6 @@ import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
-import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import java.io.File
 import java.io.FileInputStream
@@ -54,20 +53,27 @@ class MainActivity : FlutterActivity() {
                     )
                 }
             }
-     private fun saveWithMediaStore(source: String, name: String, mime: String, result: MethodChannel.Result) {
+    }
+
+    private fun saveWithMediaStore(
+        source: String,
+        name: String,
+        mime: String,
+        result: MethodChannel.Result
+    ) {
         var uri: Uri? = null
         try {
-            val isVideo = mime.startsWith("video/")
-            val isAudio = mime.startsWith("audio/")
             val collection = when {
-                isVideo -> MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
-                isAudio -> MediaStore.Audio.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+                mime.startsWith("video/") ->
+                    MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+                mime.startsWith("audio/") ->
+                    MediaStore.Audio.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
                 else -> MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL)
             }
             val relativeFolder = when {
-                isVideo -> Environment.DIRECTORY_MOVIES + "/Cosmic Download"
-                isAudio -> Environment.DIRECTORY_MUSIC + "/Cosmic Download"
-                else -> Environment.DIRECTORY_DOWNLOADS + "/Cosmic Download"
+                mime.startsWith("video/") -> "${Environment.DIRECTORY_MOVIES}/Cosmic Download"
+                mime.startsWith("audio/") -> "${Environment.DIRECTORY_MUSIC}/Cosmic Download"
+                else -> "${Environment.DIRECTORY_DOWNLOADS}/Cosmic Download"
             }
             val values = ContentValues().apply {
                 put(MediaStore.MediaColumns.DISPLAY_NAME, name)
@@ -82,7 +88,9 @@ class MainActivity : FlutterActivity() {
                 FileInputStream(File(source)).use { input -> input.copyTo(output) }
                 output.flush()
             }
-            val ready = ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }
+            val ready = ContentValues().apply {
+                put(MediaStore.MediaColumns.IS_PENDING, 0)
+            }
             contentResolver.update(uri, ready, null, null)
             result.success("$relativeFolder/$name")
         } catch (error: Exception) {
@@ -91,14 +99,22 @@ class MainActivity : FlutterActivity() {
         }
     }
 
-    private fun saveLegacy(source: String, name: String, mime: String, result: MethodChannel.Result) {
+    private fun saveLegacy(
+        source: String,
+        name: String,
+        mime: String,
+        result: MethodChannel.Result
+    ) {
         try {
             val parent = when {
                 mime.startsWith("video/") -> Environment.DIRECTORY_MOVIES
                 mime.startsWith("audio/") -> Environment.DIRECTORY_MUSIC
                 else -> Environment.DIRECTORY_DOWNLOADS
             }
-            val folder = File(Environment.getExternalStoragePublicDirectory(parent), "Cosmic Download")
+            val folder = File(
+                Environment.getExternalStoragePublicDirectory(parent),
+                "Cosmic Download"
+            )
             if (!folder.exists() && !folder.mkdirs()) {
                 throw IllegalStateException("Could not create the public media folder.")
             }
@@ -106,12 +122,16 @@ class MainActivity : FlutterActivity() {
             FileInputStream(File(source)).use { input ->
                 FileOutputStream(destination).use { output -> input.copyTo(output) }
             }
-            MediaScannerConnection.scanFile(this, arrayOf(destination.absolutePath), arrayOf(mime), null)
+            MediaScannerConnection.scanFile(
+                this,
+                arrayOf(destination.absolutePath),
+                arrayOf(mime),
+                null
+            )
             result.success("$parent/Cosmic Download/$name")
         } catch (error: Exception) {
             result.error("SAVE_FAILED", error.message ?: "Could not save media to the phone.", null)
         }
-    }
     }
 
     override fun onRequestPermissionsResult(
@@ -129,7 +149,11 @@ class MainActivity : FlutterActivity() {
         if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
             saveLegacy(args.first, args.second, args.third, result)
         } else {
-            result.error("STORAGE_PERMISSION_DENIED", "Storage permission is required to save into Downloads.", null)
+            result.error(
+                "STORAGE_PERMISSION_DENIED",
+                "Storage permission is required to save into Downloads.",
+                null
+            )
         }
     }
 }
