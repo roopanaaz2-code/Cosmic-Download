@@ -29,6 +29,8 @@ jobs:
           git checkout HEAD -- lib/main.dart pubspec.yaml android/app/src/main/AndroidManifest.xml
       - name: Resolve packages
         run: flutter pub get
+      - name: Remove generated template test
+        run: rm -rf test
       - name: Analyze
         run: flutter analyze --no-pub
       - name: Build release APK
