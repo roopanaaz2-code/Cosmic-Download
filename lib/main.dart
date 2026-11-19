@@ -2,6 +2,8 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
 import 'package:dio/dio.dart';
+import 'package:ffmpeg_kit_flutter_new_audio/ffmpeg_kit.dart';
+import 'package:ffmpeg_kit_flutter_new_audio/return_code.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -10,6 +12,7 @@ import 'package:just_audio/just_audio.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:video_player/video_player.dart';
+import 'package:webview_flutter/webview_flutter.dart';
 
 const bg = Color(0xFF050817);
 const panel = Color(0xFF111A32);
@@ -65,6 +68,10 @@ class HomePage extends StatefulWidget {
 
 class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
   final urlController = TextEditingController();
+  final browserAddressController = TextEditingController();
+  late final WebViewController browserController;
+  String browserPlatform = 'Web';
+  bool browserLoading = false, converting = false;
   final dio = Dio(BaseOptions(connectTimeout: const Duration(seconds: 25), receiveTimeout: const Duration(minutes: 0)));
   final items = <DownloadItem>[];
   final audio = AudioPlayer();
@@ -75,8 +82,28 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
   String? playingName;
 
   @override
+  void initState() {
+    super.initState();
+    browserController = WebViewController()
+      ..setJavaScriptMode(JavaScriptMode.unrestricted)
+      ..setNavigationDelegate(NavigationDelegate(
+        onPageStarted: (_) { if (mounted) setState(() => browserLoading = true); },
+        onPageFinished: (_) { if (mounted) setState(() => browserLoading = false); },
+        onNavigationRequest: (request) {
+          if (_isDirectMediaUrl(request.url)) {
+            _startDownload(request.url);
+            return NavigationDecision.prevent;
+          }
+          return NavigationDecision.navigate;
+        },
+      ))
+      ..loadRequest(Uri.parse('https://www.google.com'));
+  }
+
+  @override
   void dispose() {
     urlController.dispose();
+    browserAddressController.dispose();
     audio.dispose();
     video?.dispose();
     super.dispose();
@@ -92,19 +119,95 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     return 'cosmic_download_${DateTime.now().millisecondsSinceEpoch}.mp4';
   }
 
-  Future<void> startDownload() async {
-    final url = urlController.text.trim();
+  Future<void> startDownload() => _startDownload(urlController.text.trim());
+
+  bool _isDirectMediaUrl(String value) {
+    final uri = Uri.tryParse(value);
+    if (uri == null) return false;
+    final path = uri.path.toLowerCase();
+    return RegExp(r'\.(mp4|m4v|mov|webm|mkv|avi|mp3|m4a|aac|wav|ogg|flac)$').hasMatch(path);
+  }
+
+  Future<void> _startDownload(String url) async {
     final uri = Uri.tryParse(url);
     if (uri == null || !{'http', 'https'}.contains(uri.scheme) || uri.host.isEmpty) {
-      setState(() => statusMessage = 'Enter a valid direct HTTP or HTTPS media link.');
+      if (mounted) setState(() => statusMessage = 'Enter a valid direct HTTP or HTTPS media link.');
       return;
     }
     final item = DownloadItem(fileNameFrom(url), url);
-    setState(() { items.insert(0, item); downloading = true; showGalaxy = true; statusMessage = 'Preparing launch sequence…'; tab = 1; });
+    if (mounted) setState(() { items.insert(0, item); downloading = true; showGalaxy = true; statusMessage = 'Preparing launch sequence…'; tab = 1; });
     if (sound) SystemSound.play(SystemSoundType.click);
     await notifications.show(item.notificationId, 'Cosmic Download', 'Download started: ${item.name}',
       const NotificationDetails(android: AndroidNotificationDetails('cosmic_downloads', 'Downloads', channelDescription: 'Download progress and completion', importance: Importance.low, priority: Priority.low, showProgress: true, maxProgress: 100, progress: 0)));
     await _download(item);
+  }
+
+  Future<void> searchInBrowser() async {
+    final query = browserAddressController.text.trim();
+    if (query.isEmpty) return;
+    final direct = Uri.tryParse(query);
+    if (direct != null && direct.hasScheme && direct.host.isNotEmpty) {
+      await browserController.loadRequest(direct);
+      return;
+    }
+    final encoded = Uri.encodeComponent(query);
+    final String target;
+    switch (browserPlatform) {
+      case 'YouTube':
+        target = 'https://www.youtube.com/results?search_query=$encoded';
+        break;
+      case 'TikTok':
+        target = 'https://www.tiktok.com/search?q=$encoded';
+        break;
+      case 'Facebook':
+        target = 'https://www.google.com/search?q=${Uri.encodeComponent('site:facebook.com $query')}';
+        break;
+      case 'Instagram':
+        target = 'https://www.google.com/search?q=${Uri.encodeComponent('site:instagram.com $query')}';
+        break;
+      case 'X':
+        target = 'https://x.com/search?q=$encoded';
+        break;
+      case 'Vimeo':
+        target = 'https://vimeo.com/search?q=$encoded';
+        break;
+      default:
+        target = 'https://www.google.com/search?q=$encoded';
+    }
+    await browserController.loadRequest(Uri.parse(target));
+  }
+
+  Future<void> convertToMp3() async {
+    if (converting) return;
+    final picked = await FilePicker.platform.pickFiles(type: FileType.video);
+    final input = picked?.files.single.path;
+    if (input == null) return;
+    setState(() { converting = true; statusMessage = 'Converting audio…'; });
+    try {
+      final docs = await getApplicationDocumentsDirectory();
+      final folder = Directory('${docs.path}/CosmicDownloads');
+      if (!await folder.exists()) await folder.create(recursive: true);
+      final base = input.split(Platform.pathSeparator).last.replaceFirst(RegExp(r'\.[^.]+$'), '');
+      final output = '${folder.path}/$base.mp3';
+      String quote(String value) => '"${value.replaceAll('"', r'\"')}"';
+      final session = await FFmpegKit.execute('-y -i ${quote(input)} -vn -c:a libmp3lame -b:a 192k ${quote(output)}');
+      final code = await session.getReturnCode();
+      if (ReturnCode.isSuccess(code) && await File(output).exists()) {
+        final item = DownloadItem('$base.mp3', 'local-conversion://$base');
+        item.path = output; item.progress = 1; item.status = 'Completed';
+        if (mounted) setState(() { items.insert(0, item); statusMessage = 'MP3 conversion completed'; tab = 1; });
+        await notifications.show(item.notificationId, 'MP3 conversion completed', '$base.mp3 is ready.',
+          const NotificationDetails(android: AndroidNotificationDetails('cosmic_downloads', 'Downloads', channelDescription: 'Download progress and completion', importance: Importance.high, priority: Priority.high)));
+        if (sound) SystemSound.play(SystemSoundType.alert);
+      } else {
+        final logs = await session.getOutput() ?? 'Unsupported or protected audio stream.';
+        if (mounted) setState(() => statusMessage = 'Conversion failed: ${logs.substring(0, math.min(logs.length, 90))}');
+      }
+    } catch (_) {
+      if (mounted) setState(() => statusMessage = 'Could not convert this video to MP3.');
+    } finally {
+      if (mounted) setState(() => converting = false);
+    }
   }
 
   Future<void> _download(DownloadItem item) async {
@@ -127,7 +230,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
         });
       item.path = path; item.progress = 1; item.status = 'Completed';
       if (sound) SystemSound.play(SystemSoundType.alert);
-      await notifications.show(1001, 'Mission completed!', '${item.name} is ready in CosmicDownloads.',
+      await notifications.show(item.notificationId, 'Mission completed!', '${item.name} is ready in CosmicDownloads.',
         const NotificationDetails(android: AndroidNotificationDetails('cosmic_downloads', 'Downloads', channelDescription: 'Download progress and completion', importance: Importance.high, priority: Priority.high)));
       if (mounted) setState(() => statusMessage = 'Mission completed • file saved');
     } on DioException catch (e) {
@@ -170,7 +273,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
 
   @override
   Widget build(BuildContext context) {
-    final pages = [_home(), _downloads(), _videoPage(), _musicPage()];
+    final pages = [_home(), _downloads(), _videoPage(), _musicPage(), _browserPage()];
     return Scaffold(
       body: Stack(children: [
         SafeArea(child: IndexedStack(index: tab, children: pages)),
@@ -185,6 +288,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
           NavigationDestination(icon: Icon(Icons.download_rounded), label: 'Downloads'),
           NavigationDestination(icon: Icon(Icons.movie_rounded), label: 'Video'),
           NavigationDestination(icon: Icon(Icons.headphones_rounded), label: 'Music'),
+          NavigationDestination(icon: Icon(Icons.language_rounded), label: 'Browser'),
         ],
       ),
     );
@@ -229,7 +333,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
       _tile(Icons.download_for_offline_rounded, 'Download manager', 'Track your missions', () => setState(() => tab = 1)),
       _tile(Icons.video_library_rounded, 'Video player', 'Play local videos', chooseVideo),
       _tile(Icons.library_music_rounded, 'Music player', 'Play local audio', playAudio),
-      _tile(Icons.graphic_eq_rounded, 'MP3 converter', 'Coming in next engine update', () => _message('Audio extraction engine is scheduled for the next release.')),
+      _tile(Icons.graphic_eq_rounded, 'MP3 converter', converting ? 'Converting…' : 'Extract audio from video', convertToMp3),
     ]),
     const SizedBox(height: 16),
     Container(padding: const EdgeInsets.all(14), decoration: BoxDecoration(color: panel, borderRadius: BorderRadius.circular(16)), child: const Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -242,6 +346,29 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
   Widget _tile(IconData icon, String title, String subtitle, VoidCallback action) => InkWell(onTap: action, borderRadius: BorderRadius.circular(16), child: Container(padding: const EdgeInsets.all(13), decoration: BoxDecoration(color: panel, borderRadius: BorderRadius.circular(16), border: Border.all(color: Colors.white10)), child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisAlignment: MainAxisAlignment.center, children: [
     Icon(icon, color: cyan, size: 23), const SizedBox(height: 8), Text(title, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12)), Text(subtitle, style: const TextStyle(color: Colors.white54, fontSize: 10), maxLines: 1, overflow: TextOverflow.ellipsis),
   ])));
+
+  Widget _browserPage() => Column(children: [
+    Padding(padding: const EdgeInsets.fromLTRB(18, 18, 18, 10), child: _header()),
+    Padding(padding: const EdgeInsets.symmetric(horizontal: 14), child: Row(children: [
+      Expanded(child: DropdownButtonFormField<String>(
+        value: browserPlatform,
+        decoration: const InputDecoration(prefixIcon: Icon(Icons.travel_explore), isDense: true),
+        items: const ['Web', 'YouTube', 'TikTok', 'Facebook', 'Instagram', 'X', 'Vimeo'].map((v) => DropdownMenuItem(value: v, child: Text(v))).toList(),
+        onChanged: (v) { if (v != null) setState(() => browserPlatform = v); },
+      )),
+      const SizedBox(width: 8),
+      Expanded(flex: 2, child: TextField(
+        controller: browserAddressController,
+        textInputAction: TextInputAction.search,
+        onSubmitted: (_) => searchInBrowser(),
+        decoration: const InputDecoration(hintText: 'Search or enter URL', isDense: true),
+      )),
+      IconButton(onPressed: searchInBrowser, icon: const Icon(Icons.search, color: cyan)),
+    ])),
+    if (browserLoading) const LinearProgressIndicator(minHeight: 2, color: cyan),
+    Expanded(child: WebViewWidget(controller: browserController)),
+    const Padding(padding: EdgeInsets.all(8), child: Text('Search results open in the selected site. Direct media-file links can be downloaded; protected posts may not be available.', style: TextStyle(color: Colors.white54, fontSize: 10), textAlign: TextAlign.center)),
+  ]);
 
   Widget _downloads() => ListView(padding: const EdgeInsets.all(18), children: [
     _header(), const SizedBox(height: 20), const Text('DOWNLOAD MISSIONS', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900)),
