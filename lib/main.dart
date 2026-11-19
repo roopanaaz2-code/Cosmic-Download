@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
+import 'dart:ui' as ui;
 import 'package:dio/dio.dart';
 import 'package:ffmpeg_kit_flutter_new_audio/ffmpeg_kit.dart';
 import 'package:ffmpeg_kit_flutter_new_audio/return_code.dart';
@@ -393,6 +394,13 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     final pages = [_home(), _downloads(), _videoPage(), _musicPage(), _browserPage()];
     return Scaffold(
       body: Stack(children: [
+        Positioned.fill(child: ImageFiltered(
+          imageFilter: ui.ImageFilter.blur(sigmaX: 8, sigmaY: 8),
+          child: const CustomPaint(painter: GalaxyPainter()),
+        )),
+        Positioned.fill(child: Container(
+          decoration: BoxDecoration(color: bg.withValues(alpha: .72)),
+        )),
         SafeArea(child: IndexedStack(index: tab, children: pages)),
         if (showGalaxy && items.any((e) => e.status == 'Downloading'))
           Positioned.fill(child: GalaxyMissionOverlay(items: items, onClose: () => setState(() => showGalaxy = false))),
