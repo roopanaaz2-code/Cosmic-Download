@@ -219,14 +219,12 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
       final path = '${folder.path}/$safeName';
       item.status = 'Downloading';
       setState(() {});
-      await dio.download(item.url, path, cancelToken: item.cancelToken,
-        options: Options(followRedirects: true, headers: {'User-Agent': 'CosmicDownload/1.0'}),
-        onReceiveProgress: (received, total) {
-          if (total > 0) item.progress = received / total;
-          setState(() {});
-          notifications.show(item.notificationId, 'Cosmic Download', '${(item.progress * 100).round()}% • ${item.name}',
-            NotificationDetails(android: AndroidNotificationDetails('cosmic_downloads', 'Downloads', channelDescription: 'Download progress and completion', importance: Importance.low, priority: Priority.low, showProgress: true, maxProgress: 100, progress: (item.progress * 100).round())));
-        });
+      final rangeSize = turbo ? await _rangeDownloadSize(item.url) : null;
+      if (rangeSize != null) {
+        await _downloadInSegments(item, path, rangeSize);
+      } else {
+        await _downloadSingle(item, path);
+      }
       item.path = path; item.progress = 1; item.status = 'Completed';
       if (sound) SystemSound.play(SystemSoundType.alert);
       await notifications.show(item.notificationId, 'Mission completed!', '${item.name} is ready in CosmicDownloads.',
@@ -240,6 +238,80 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
       if (mounted) setState(() => statusMessage = 'Could not save this media file.');
     } finally {
       if (mounted) setState(() { downloading = items.any((e) => e.status == 'Downloading'); if (!downloading) showGalaxy = false; });
+    }
+  }
+
+  Future<int?> _rangeDownloadSize(String url) async {
+    try {
+      final response = await dio.head(url, options: Options(
+        followRedirects: true,
+        headers: {'User-Agent': 'CosmicDownload/1.0'},
+      ));
+      final acceptsRanges = response.headers.value('accept-ranges')?.toLowerCase() == 'bytes';
+      final length = int.tryParse(response.headers.value(Headers.contentLengthHeader) ?? '');
+      if (acceptsRanges && length != null && length >= 8 * 1024 * 1024) return length;
+    } catch (_) {
+      // Some hosts block HEAD; use the normal single-stream downloader.
+    }
+    return null;
+  }
+
+  Future<void> _downloadSingle(DownloadItem item, String path) async {
+    await dio.download(item.url, path, cancelToken: item.cancelToken,
+      options: Options(followRedirects: true, headers: {'User-Agent': 'CosmicDownload/1.0'}),
+      onReceiveProgress: (received, total) {
+        if (total > 0) item.progress = received / total;
+        if (mounted) setState(() {});
+        notifications.show(item.notificationId, 'Cosmic Download', '${(item.progress * 100).round()}% • ${item.name}',
+          NotificationDetails(android: AndroidNotificationDetails('cosmic_downloads', 'Downloads', channelDescription: 'Download progress and completion', importance: Importance.low, priority: Priority.low, showProgress: true, maxProgress: 100, progress: (item.progress * 100).round())));
+      });
+  }
+
+  Future<void> _downloadInSegments(DownloadItem item, String outputPath, int totalBytes) async {
+    const segmentCount = 4;
+    final tempFolder = Directory('$outputPath.cosmic-parts');
+    if (await tempFolder.exists()) await tempFolder.delete(recursive: true);
+    await tempFolder.create(recursive: true);
+    final receivedBySegment = List<int>.filled(segmentCount, 0);
+    final segmentFiles = List.generate(segmentCount, (i) => File('${tempFolder.path}/part_$i'));
+    final segmentSize = (totalBytes / segmentCount).ceil();
+    try {
+      await Future.wait(List.generate(segmentCount, (index) async {
+        final start = index * segmentSize;
+        final end = math.min(start + segmentSize - 1, totalBytes - 1);
+        final response = await dio.download(
+          item.url,
+          segmentFiles[index].path,
+          cancelToken: item.cancelToken,
+          options: Options(
+            followRedirects: true,
+            headers: {'User-Agent': 'CosmicDownload/1.0', 'Range': 'bytes=$start-$end'},
+          ),
+          onReceiveProgress: (received, _) {
+            receivedBySegment[index] = received;
+            final allReceived = receivedBySegment.fold<int>(0, (sum, value) => sum + value);
+            item.progress = (allReceived / totalBytes).clamp(0.0, 1.0);
+            if (mounted) setState(() {});
+            notifications.show(item.notificationId, 'Cosmic Turbo Download', '${(item.progress * 100).round()}% • ${item.name}',
+              NotificationDetails(android: AndroidNotificationDetails('cosmic_downloads', 'Downloads', channelDescription: 'Download progress and completion', importance: Importance.low, priority: Priority.low, showProgress: true, maxProgress: 100, progress: (item.progress * 100).round())));
+          },
+        );
+        if (response.statusCode != 206) {
+          throw StateError('The server did not honor the byte-range request.');
+        }
+      }));
+      final output = File(outputPath).openWrite();
+      for (final part in segmentFiles) {
+        await output.addStream(part.openRead());
+      }
+      await output.flush();
+      await output.close();
+      item.progress = 1;
+    } catch (_) {
+      if (await File(outputPath).exists()) await File(outputPath).delete();
+      rethrow;
+    } finally {
+      if (await tempFolder.exists()) await tempFolder.delete(recursive: true);
     }
   }
 
