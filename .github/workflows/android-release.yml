@@ -30,6 +30,10 @@ jobs:
       - name: Restore app sources and Android manifest
         run: |
           git checkout HEAD -- lib/main.dart pubspec.yaml android/app/src/main/AndroidManifest.xml android/app/src/main/kotlin/com/cosmicdownload/cosmic_download/MainActivity.kt
+      - name: Install image conversion utility
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y imagemagick
       - name: Apply uploaded frog launcher icon
         run: |
           mkdir -p android/app/src/main/res/mipmap-mdpi android/app/src/main/res/mipmap-hdpi android/app/src/main/res/mipmap-xhdpi android/app/src/main/res/mipmap-xxhdpi android/app/src/main/res/mipmap-xxxhdpi
