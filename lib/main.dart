@@ -3,6 +3,7 @@ import 'dart:io';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
 import 'package:dio/dio.dart';
+import 'package:extractor/extractor.dart';
 import 'package:ffmpeg_kit_flutter_new_full/ffmpeg_kit.dart';
 import 'package:ffmpeg_kit_flutter_new_full/return_code.dart';
 import 'package:file_picker/file_picker.dart';
@@ -78,6 +79,17 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
   String browserPlatform = 'Web';
   bool browserLoading = false, converting = false;
   final dio = Dio(BaseOptions(connectTimeout: const Duration(seconds: 25), receiveTimeout: const Duration(minutes: 0)));
+  final youtubeDL = YoutubeDLFlutter.instance;
+  bool extractorInitialized = false;
+
+  Future<void> _ensureExtractor() async {
+    if (extractorInitialized) return;
+    final initialized = await youtubeDL.initialize(enableFFmpeg: true, enableAria2c: false);
+    if (!initialized.success) {
+      throw StateError(initialized.errorMessage ?? 'Media extraction engine could not initialize.');
+    }
+    extractorInitialized = true;
+  }
   final items = <DownloadItem>[];
   final audio = AudioPlayer();
   bool sound = false, downloading = false, showGalaxy = false;
@@ -291,15 +303,58 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
       final dir = await getApplicationDocumentsDirectory();
       final folder = Directory('${dir.path}/CosmicDownloads');
       if (!await folder.exists()) await folder.create(recursive: true);
-      final sourceName = fileNameFrom(item.url);
-      final rawPath = '${folder.path}/source_${DateTime.now().microsecondsSinceEpoch}_$sourceName';
+      item.status = 'Preparing media extractor';
+      if (mounted) setState(() {});
+      await _ensureExtractor();
+      final processId = 'cosmic_${DateTime.now().microsecondsSinceEpoch}';
+      final format = switch (item.quality) {
+        '1080p' => 'bestvideo[height<=1080]+bestaudio/best[height<=1080]',
+        '720p' => 'bestvideo[height<=720]+bestaudio/best[height<=720]',
+        '480p' => 'bestvideo[height<=480]+bestaudio/best[height<=480]',
+        '360p' => 'bestvideo[height<=360]+bestaudio/best[height<=360]',
+        _ => 'bestvideo+bestaudio/best',
+      };
+      final progressSubscription = youtubeDL.onProgress.listen((progress) {
+        if (progress.processId == processId && mounted) {
+          setState(() => item.progress = (progress.progress / 100).clamp(0.0, 1.0).toDouble());
+        }
+      });
       item.status = 'Downloading';
       if (mounted) setState(() {});
-      // Use one complete response for reliable media integrity across signed CDN URLs.
-      await _downloadSingle(item, rawPath);
-      final source = File(rawPath);
-      if (!await source.exists() || await source.length() == 0) throw StateError('Empty download');
-      final finalPath = '${folder.path}/${item.name}';
+      final request = DownloadRequest(
+        url: item.url,
+        outputPath: folder.path,
+        outputTemplate: '%(title).100s.%(ext)s',
+        format: format,
+        extractAudio: item.audioOnly,
+        audioFormat: item.audioOnly ? 'mp3' : null,
+        audioQuality: item.audioOnly ? 0 : null,
+        noPlaylist: true,
+        processId: processId,
+        customOptions: {'--no-warnings': '', '--retries': '5', '--fragment-retries': '5', '--no-part': ''},
+      );
+      final downloadResult = await youtubeDL.download(request);
+      await progressSubscription.cancel();
+      if (downloadResult.status != OperationStatus.success || downloadResult.outputPath == null) {
+        throw StateError(downloadResult.errorMessage ?? 'The media extractor could not download this URL.');
+      }
+      final finalPath = downloadResult.outputPath!;
+      final finalFile = File(finalPath);
+      if (!await finalFile.exists() || await finalFile.length() < 12) {
+        throw StateError('The extractor reported success, but the media file is missing or empty.');
+      }
+      final actualName = finalFile.uri.pathSegments.isNotEmpty ? finalFile.uri.pathSegments.last : item.name;
+      item.status = 'Publishing to phone storage';
+      if (mounted) setState(() {});
+      item.path = finalPath;
+      item.savedLocation = await _publishToDownloads(finalPath, actualName);
+      item.progress = 1;
+      item.status = 'Completed';
+      if (sound) SystemSound.play(SystemSoundType.alert);
+      await notifications.show(item.notificationId, 'Mission completed!', '$actualName is ready in Downloads/Cosmic Download.',
+        const NotificationDetails(android: AndroidNotificationDetails('cosmic_downloads', 'Downloads', channelDescription: 'Download progress and completion', importance: Importance.high, priority: Priority.high)));
+      if (mounted) setState(() => statusMessage = 'Download ready • tap Play in Downloads');
+      return;
       if (item.audioOnly || item.quality != 'Original') {
         item.status = item.audioOnly ? 'Converting to MP3' : 'Optimizing video';
         if (mounted) setState(() {});
