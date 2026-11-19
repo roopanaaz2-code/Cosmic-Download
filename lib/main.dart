@@ -175,7 +175,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
             const SizedBox(height: 16),
             Wrap(spacing: 8, runSpacing: 8, children: ['Original','1080p','720p','480p','360p'].map((q) =>
               ChoiceChip(label: Text(q), selected: !mp3 && selected == q,
-                onSelected: (_) => refresh(() { selected = q; mp3 = false; })).toList()),
+                onSelected: (_) => refresh(() { selected = q; mp3 = false; }))).toList(),
             ),
             const SizedBox(height: 8),
             ListTile(
