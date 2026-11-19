@@ -19,6 +19,7 @@ const cyan = Color(0xFF55D9FF);
 const violet = Color(0xFF9B78FF);
 
 final notifications = FlutterLocalNotificationsPlugin();
+const storageChannel = MethodChannel('cosmic_download/storage');
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -56,6 +57,7 @@ class DownloadItem {
   double progress = 0;
   String status = 'Queued';
   String? path;
+  String? savedLocation;
   CancelToken? cancelToken;
 }
 
@@ -116,6 +118,24 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
       if (decoded.contains('.') && decoded.length < 100) return decoded.replaceAll(RegExp(r'[^a-zA-Z0-9._-]'), '_');
     } catch (_) {}
     return 'cosmic_download_${DateTime.now().millisecondsSinceEpoch}.mp4';
+  }
+
+  Future<String> _publishToDownloads(String sourcePath, String name) async {
+    final lower = name.toLowerCase();
+    final mime = lower.endsWith('.mp3') ? 'audio/mpeg'
+        : lower.endsWith('.m4a') ? 'audio/mp4'
+        : lower.endsWith('.webm') ? 'video/webm'
+        : lower.endsWith('.mkv') ? 'video/x-matroska'
+        : lower.endsWith('.mov') ? 'video/quicktime'
+        : lower.endsWith('.mp4') ? 'video/mp4'
+        : 'application/octet-stream';
+    final location = await storageChannel.invokeMethod<String>('saveToDownloads', {
+      'sourcePath': sourcePath, 'fileName': name, 'mimeType': mime,
+    });
+    if (location == null || location.isEmpty) {
+      throw StateError('Android could not publish the file to Downloads.');
+    }
+    return location;
   }
 
   Future<void> startDownload() => _startDownload(urlController.text.trim());
@@ -193,7 +213,9 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
       final code = await session.getReturnCode();
       if (ReturnCode.isSuccess(code) && await File(output).exists()) {
         final item = DownloadItem('$base.mp3', 'local-conversion://$base');
-        item.path = output; item.progress = 1; item.status = 'Completed';
+        item.path = output;
+        item.savedLocation = await _publishToDownloads(output, '$base.mp3');
+        item.progress = 1; item.status = 'Completed';
         if (mounted) setState(() { items.insert(0, item); statusMessage = 'MP3 conversion completed'; tab = 1; });
         await notifications.show(item.notificationId, 'MP3 conversion completed', '$base.mp3 is ready.',
           const NotificationDetails(android: AndroidNotificationDetails('cosmic_downloads', 'Downloads', channelDescription: 'Download progress and completion', importance: Importance.high, priority: Priority.high)));
@@ -221,18 +243,31 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
       setState(() {});
       final rangeSize = turbo ? await _rangeDownloadSize(item.url) : null;
       if (rangeSize != null) {
-        await _downloadInSegments(item, path, rangeSize);
+        try {
+          await _downloadInSegments(item, path, rangeSize);
+        } catch (error) {
+          if (error is DioException && CancelToken.isCancel(error)) rethrow;
+          final partial = File(path);
+          if (await partial.exists()) await partial.delete();
+          await _downloadSingle(item, path);
+        }
       } else {
         await _downloadSingle(item, path);
       }
-      item.path = path; item.progress = 1; item.status = 'Completed';
+      final completedFile = File(path);
+      if (!await completedFile.exists() || await completedFile.length() == 0) {
+        throw StateError('The server returned an empty file.');
+      }
+      item.path = path;
+      item.savedLocation = await _publishToDownloads(path, item.name);
+      item.progress = 1; item.status = 'Completed';
       if (sound) SystemSound.play(SystemSoundType.alert);
       await notifications.show(item.notificationId, 'Mission completed!', '${item.name} is ready in CosmicDownloads.',
         const NotificationDetails(android: AndroidNotificationDetails('cosmic_downloads', 'Downloads', channelDescription: 'Download progress and completion', importance: Importance.high, priority: Priority.high)));
       if (mounted) setState(() => statusMessage = 'Mission completed • file saved');
     } on DioException catch (e) {
       item.status = CancelToken.isCancel(e) ? 'Cancelled' : 'Failed';
-      if (mounted) setState(() => statusMessage = item.status == 'Failed' ? 'Download failed. Check the link or try again.' : 'Download cancelled.');
+      if (mounted) setState(() => statusMessage = item.status == 'Failed' ? 'Download failed: check the direct media link, network or phone storage.' : 'Download cancelled.');
     } catch (_) {
       item.status = 'Failed';
       if (mounted) setState(() => statusMessage = 'Could not save this media file.');
@@ -257,14 +292,20 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
   }
 
   Future<void> _downloadSingle(DownloadItem item, String path) async {
-    await dio.download(item.url, path, cancelToken: item.cancelToken,
-      options: Options(followRedirects: true, headers: {'User-Agent': 'CosmicDownload/1.0'}),
+    final response = await dio.download(item.url, path, cancelToken: item.cancelToken,
+      options: Options(followRedirects: true, headers: {'User-Agent': 'Mozilla/5.0 (Linux; Android 15) AppleWebKit/537.36 Chrome/131.0 Mobile Safari/537.36'}),
       onReceiveProgress: (received, total) {
-        if (total > 0) item.progress = received / total;
+        if (total > 0) item.progress = (received / total).clamp(0.0, 1.0).toDouble();
         if (mounted) setState(() {});
         notifications.show(item.notificationId, 'Cosmic Download', '${(item.progress * 100).round()}% • ${item.name}',
           NotificationDetails(android: AndroidNotificationDetails('cosmic_downloads', 'Downloads', channelDescription: 'Download progress and completion', importance: Importance.low, priority: Priority.low, showProgress: true, maxProgress: 100, progress: (item.progress * 100).round())));
       });
+    if (response.statusCode == null || response.statusCode! < 200 || response.statusCode! >= 300) {
+      throw StateError('Unexpected HTTP status: ${response.statusCode}');
+    }
+    if (!await File(path).exists() || await File(path).length() == 0) {
+      throw StateError('The response did not contain a file.');
+    }
   }
 
   Future<void> _downloadInSegments(DownloadItem item, String outputPath, int totalBytes) async {
@@ -296,8 +337,10 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
               NotificationDetails(android: AndroidNotificationDetails('cosmic_downloads', 'Downloads', channelDescription: 'Download progress and completion', importance: Importance.low, priority: Priority.low, showProgress: true, maxProgress: 100, progress: (item.progress * 100).round())));
           },
         );
-        if (response.statusCode != 206) {
-          throw StateError('The server did not honor the byte-range request.');
+        final expectedLength = end - start + 1;
+        final actualLength = await segmentFiles[index].length();
+        if (response.statusCode != 206 || actualLength != expectedLength) {
+          throw StateError('The server did not return the requested byte range.');
         }
       }));
       final output = File(outputPath).openWrite();
@@ -306,6 +349,9 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
       }
       await output.flush();
       await output.close();
+      if (await File(outputPath).length() != totalBytes) {
+        throw StateError('Turbo segments did not produce the complete file.');
+      }
       item.progress = 1;
     } catch (_) {
       if (await File(outputPath).exists()) await File(outputPath).delete();
@@ -408,9 +454,9 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     ]),
     const SizedBox(height: 16),
     Container(padding: const EdgeInsets.all(14), decoration: BoxDecoration(color: panel, borderRadius: BorderRadius.circular(16)), child: const Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      Text('Speed note', style: TextStyle(color: cyan, fontWeight: FontWeight.bold)),
+      Text('Real downloads', style: TextStyle(color: cyan, fontWeight: FontWeight.bold)),
       SizedBox(height: 5),
-      Text('Cosmic Download uses direct HTTP downloads. Actual speed depends on your connection and the source server. Parallel acceleration and supported-site integrations will be added after compatibility testing.', style: TextStyle(color: Colors.white60, fontSize: 12, height: 1.4)),
+      Text('Files are saved to your phone in Downloads/Cosmic Download. Turbo mode verifies every byte-range part and automatically retries with a normal download if the server does not support ranges correctly. Only direct, accessible media-file URLs work; protected social posts and DRM streams cannot be downloaded.', style: TextStyle(color: Colors.white60, fontSize: 12, height: 1.4)),
     ])),
   ]);
 
@@ -449,6 +495,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
       Row(children: [const Icon(Icons.insert_drive_file_rounded, color: cyan), const SizedBox(width: 9), Expanded(child: Text(item.name, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontWeight: FontWeight.bold))), Text(item.status, style: TextStyle(color: item.status == 'Completed' ? Colors.greenAccent : cyan, fontSize: 11))]),
       const SizedBox(height: 10), LinearProgressIndicator(value: item.progress, backgroundColor: Colors.white12, color: cyan, minHeight: 6, borderRadius: BorderRadius.circular(9)),
       const SizedBox(height: 8), Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [Text('${(item.progress * 100).round()}%', style: const TextStyle(color: Colors.white60, fontSize: 11)), if (item.status == 'Downloading') TextButton(onPressed: () => cancel(item), child: const Text('Cancel')) else if (item.status == 'Failed') TextButton(onPressed: () => retry(item), child: const Text('Retry')) else if (item.status == 'Completed') const Text('Saved', style: TextStyle(color: Colors.greenAccent, fontSize: 11))]),
+      if (item.savedLocation != null) Padding(padding: const EdgeInsets.only(top: 6), child: Text('Phone storage: ${item.savedLocation}', style: const TextStyle(color: Colors.greenAccent, fontSize: 10))),
     ]))),
   ]);
 
@@ -536,7 +583,10 @@ class _GalaxyMissionOverlayState extends State<GalaxyMissionOverlay> with Single
             IconButton(onPressed: widget.onClose, icon: const Icon(Icons.close_rounded)),
           ]),
           const Spacer(),
-          const Icon(Icons.public_rounded, color: cyan, size: 92),
+          AnimatedBuilder(animation: controller, builder: (_, __) => Transform.rotate(
+          angle: controller.value * math.pi * 2,
+          child: const Icon(Icons.public_rounded, color: cyan, size: 92),
+        )),
           const SizedBox(height: 24),
           const Text('TRAVELLING THROUGH THE GALAXY', textAlign: TextAlign.center, style: TextStyle(fontSize: 12, letterSpacing: 2, color: Colors.white70)),
           const SizedBox(height: 14),
@@ -558,33 +608,88 @@ class _GalaxyMissionOverlayState extends State<GalaxyMissionOverlay> with Single
 class FullGalaxyPainter extends CustomPainter {
   FullGalaxyPainter(this.phase);
   final double phase;
-  @override
-  void paint(Canvas canvas, Size size) {
-    final center = Offset(size.width * .5, size.height * .46);
-    final rect = Offset.zero & size;
-    canvas.drawRect(rect, Paint()..shader = const LinearGradient(begin: Alignment.topCenter, end: Alignment.bottomCenter, colors: [Color(0xFF101D45), Color(0xFF080A20), Color(0xFF02040D)]).createShader(rect));
-    final nebula = Paint()..shader = RadialGradient(colors: [violet.withValues(alpha: .22), cyan.withValues(alpha: .07), Colors.transparent]).createShader(Rect.fromCircle(center: center, radius: size.width * .72));
-    canvas.drawCircle(center, size.width * .72, nebula);
-    final starRandom = math.Random(804);
-    for (var i = 0; i < 180; i++) {
-      final p = Offset(starRandom.nextDouble() * size.width, starRandom.nextDouble() * size.height);
-      final twinkle = .25 + .65 * ((math.sin(phase * math.pi * 2 + i) + 1) / 2);
-      canvas.drawCircle(p, starRandom.nextDouble() * 1.5 + .35, Paint()..color = Colors.white.withValues(alpha: twinkle));
-    }
-    final sunPaint = Paint()..shader = const RadialGradient(colors: [Color(0xFFFFF6C5), Color(0xFFFFA24C), Color(0x00FF743A)]).createShader(Rect.fromCircle(center: center, radius: 48));
-    canvas.drawCircle(center, 48, sunPaint);
-    final orbitPaint = Paint()..color = cyan.withValues(alpha: .3)..style = PaintingStyle.stroke..strokeWidth = 1;
+
+  void _planet(Canvas canvas, Offset center, double rx, double ry, double angle,
+      Color color, double radius, {double tilt = 0}) {
     canvas.save();
     canvas.translate(center.dx, center.dy);
-    canvas.rotate(phase * math.pi * 2);
-    canvas.drawOval(Rect.fromCenter(center: Offset.zero, width: size.width * .66, height: size.width * .22), orbitPaint);
-    canvas.drawOval(Rect.fromCenter(center: Offset.zero, width: size.width * .88, height: size.width * .34), orbitPaint);
-    canvas.drawCircle(Offset(size.width * .33, 0), 12, Paint()..color = cyan);
-    canvas.drawCircle(Offset(-size.width * .43, 0), 8, Paint()..color = violet);
+    canvas.rotate(tilt);
+    final orbit = Paint()..color = color.withValues(alpha: .25)
+      ..style = PaintingStyle.stroke..strokeWidth = 1;
+    canvas.drawOval(Rect.fromCenter(center: Offset.zero, width: rx * 2, height: ry * 2), orbit);
+    final p = Offset(math.cos(angle) * rx, math.sin(angle) * ry);
+    final glow = Paint()..shader = RadialGradient(
+      colors: [color.withValues(alpha: .55), Colors.transparent],
+    ).createShader(Rect.fromCircle(center: p, radius: radius * 2.8));
+    canvas.drawCircle(p, radius * 2.8, glow);
+    final body = Paint()..shader = RadialGradient(
+      center: const Alignment(-.35, -.4),
+      colors: [Colors.white.withValues(alpha: .8), color, color.withValues(alpha: .45)],
+    ).createShader(Rect.fromCircle(center: p, radius: radius));
+    canvas.drawCircle(p, radius, body);
     canvas.restore();
-    canvas.drawCircle(Offset(size.width * .19, size.height * .22), 19, Paint()..color = const Color(0xFFB7C8E8));
-    canvas.drawCircle(Offset(size.width * .82, size.height * .76), 11, Paint()..color = const Color(0xFFDAA45B));
   }
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final rect = Offset.zero & size;
+    canvas.drawRect(rect, Paint()..shader = const LinearGradient(
+      begin: Alignment.topCenter, end: Alignment.bottomCenter,
+      colors: [Color(0xFF101D45), Color(0xFF080A20), Color(0xFF02040D)],
+    ).createShader(rect));
+    final center = Offset(size.width * .5, size.height * .46);
+    final nebula = Paint()..shader = RadialGradient(
+      colors: [violet.withValues(alpha: .28), cyan.withValues(alpha: .09), Colors.transparent],
+    ).createShader(Rect.fromCircle(center: center, radius: size.width * .78));
+    canvas.drawCircle(center, size.width * .78, nebula);
+
+    final random = math.Random(804);
+    for (var i = 0; i < 260; i++) {
+      final x = random.nextDouble() * size.width;
+      final y = random.nextDouble() * size.height;
+      final twinkle = .15 + .8 * ((math.sin(phase * math.pi * 4 + i * 1.7) + 1) / 2);
+      final drift = (phase * (8 + (i % 15)) * (i.isEven ? 1 : -1)) % size.width;
+      canvas.drawCircle(Offset((x + drift) % size.width, y), random.nextDouble() * 1.55 + .25,
+        Paint()..color = Colors.white.withValues(alpha: twinkle));
+    }
+
+    for (var arm = 0; arm < 3; arm++) {
+      for (var i = 0; i < 38; i++) {
+        final t = i / 38;
+        final angle = phase * math.pi * 2 + arm * math.pi * 2 / 3 + t * 4.8;
+        final radius = 24 + t * size.width * .39;
+        final p = center + Offset(math.cos(angle) * radius, math.sin(angle) * radius * .43);
+        canvas.drawCircle(p, 1.0 + (1 - t) * 1.5,
+          Paint()..color = (arm.isEven ? cyan : violet).withValues(alpha: .12 + .45 * (1 - t)));
+      }
+    }
+
+    final sunGlow = Paint()..shader = RadialGradient(
+      colors: [const Color(0xFFFFF6C5).withValues(alpha: .65), const Color(0xFFFFA24C).withValues(alpha: .22), Colors.transparent],
+    ).createShader(Rect.fromCircle(center: center, radius: 74));
+    canvas.drawCircle(center, 74, sunGlow);
+    final sun = Paint()..shader = const RadialGradient(
+      colors: [Color(0xFFFFFFFF), Color(0xFFFFE7A0), Color(0xFFFF8B43)],
+    ).createShader(Rect.fromCircle(center: center, radius: 28));
+    canvas.drawCircle(center, 28 + math.sin(phase * math.pi * 4) * 1.8, sun);
+
+    _planet(canvas, center, size.width * .32, size.width * .105, phase * math.pi * 2, cyan, 10, tilt: -.2);
+    _planet(canvas, center, size.width * .43, size.width * .16, -phase * math.pi * 1.35 + 1, violet, 7, tilt: .18);
+    _planet(canvas, center, size.width * .24, size.width * .075, phase * math.pi * 3.2 + 2, const Color(0xFFFFB45F), 5, tilt: .32);
+    _planet(canvas, center, size.width * .49, size.width * .19, phase * math.pi * .8 + 3, const Color(0xFF75E0B2), 4, tilt: -.28);
+
+    for (var i = 0; i < 2; i++) {
+      final t = (phase * (i == 0 ? 1.15 : .72) + i * .48) % 1.0;
+      final x = t * (size.width + 160) - 80;
+      final y = size.height * (i == 0 ? .18 : .72) + math.sin(t * math.pi * 2) * 35;
+      final tail = Paint()..shader = LinearGradient(
+        colors: [Colors.transparent, (i == 0 ? cyan : violet).withValues(alpha: .8)],
+      ).createShader(Rect.fromLTWH(x - 85, y - 2, 85, 4));
+      canvas.drawLine(Offset(x - 85, y), Offset(x, y), tail..strokeWidth = 2.2);
+      canvas.drawCircle(Offset(x, y), 3, Paint()..color = Colors.white);
+    }
+  }
+
   @override
   bool shouldRepaint(covariant FullGalaxyPainter oldDelegate) => oldDelegate.phase != phase;
 }
