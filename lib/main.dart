@@ -64,7 +64,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
   final dio = Dio(BaseOptions(connectTimeout: const Duration(seconds: 25), receiveTimeout: const Duration(minutes: 0)));
   final items = <DownloadItem>[];
   final audio = AudioPlayer();
-  bool sound = false, turbo = true, downloading = false;
+  bool sound = false, turbo = true, downloading = false, showGalaxy = false;
   String statusMessage = 'Ready for your next mission';
   int tab = 0;
   VideoPlayerController? video;
@@ -96,7 +96,8 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
       return;
     }
     final item = DownloadItem(fileNameFrom(url), url);
-    setState(() { items.insert(0, item); downloading = true; statusMessage = 'Preparing launch sequence…'; tab = 1; });
+    setState(() { items.insert(0, item); downloading = true; showGalaxy = true; statusMessage = 'Preparing launch sequence…'; tab = 1; });
+    if (sound) SystemSound.play(SystemSoundType.click);
     await notifications.show(1001, 'Cosmic Download', 'Download started: ${item.name}',
       const NotificationDetails(android: AndroidNotificationDetails('cosmic_downloads', 'Downloads', channelDescription: 'Download progress and completion', importance: Importance.low, priority: Priority.low, showProgress: true, maxProgress: 100, progress: 0)));
     await _download(item);
@@ -121,6 +122,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
             NotificationDetails(android: AndroidNotificationDetails('cosmic_downloads', 'Downloads', channelDescription: 'Download progress and completion', importance: Importance.low, priority: Priority.low, showProgress: true, maxProgress: 100, progress: (item.progress * 100).round())));
         });
       item.path = path; item.progress = 1; item.status = 'Completed';
+      if (sound) SystemSound.play(SystemSoundType.alert);
       await notifications.show(1001, 'Mission completed!', '${item.name} is ready in CosmicDownloads.',
         const NotificationDetails(android: AndroidNotificationDetails('cosmic_downloads', 'Downloads', channelDescription: 'Download progress and completion', importance: Importance.high, priority: Priority.high)));
       if (mounted) setState(() => statusMessage = 'Mission completed • file saved');
@@ -131,7 +133,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
       item.status = 'Failed';
       if (mounted) setState(() => statusMessage = 'Could not save this media file.');
     } finally {
-      if (mounted) setState(() => downloading = items.any((e) => e.status == 'Downloading'));
+      if (mounted) setState(() { downloading = items.any((e) => e.status == 'Downloading'); if (!downloading) showGalaxy = false; });
     }
   }
 
@@ -166,7 +168,11 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
   Widget build(BuildContext context) {
     final pages = [_home(), _downloads(), _videoPage(), _musicPage()];
     return Scaffold(
-      body: SafeArea(child: IndexedStack(index: tab, children: pages)),
+      body: Stack(children: [
+        SafeArea(child: IndexedStack(index: tab, children: pages)),
+        if (showGalaxy && items.any((e) => e.status == 'Downloading'))
+          Positioned.fill(child: GalaxyMissionOverlay(items: items, onClose: () => setState(() => showGalaxy = false))),
+      ]),
       bottomNavigationBar: NavigationBar(
         backgroundColor: const Color(0xFF0B1124), indicatorColor: cyan.withValues(alpha: .16),
         selectedIndex: tab, onDestinationSelected: (v) => setState(() => tab = v),
@@ -298,4 +304,86 @@ class GalaxyPainter extends CustomPainter {
   }
   @override
   bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
+}
+
+
+class GalaxyMissionOverlay extends StatefulWidget {
+  const GalaxyMissionOverlay({super.key, required this.items, required this.onClose});
+  final List<DownloadItem> items;
+  final VoidCallback onClose;
+  @override
+  State<GalaxyMissionOverlay> createState() => _GalaxyMissionOverlayState();
+}
+
+class _GalaxyMissionOverlayState extends State<GalaxyMissionOverlay> with SingleTickerProviderStateMixin {
+  late final AnimationController controller = AnimationController(vsync: this, duration: const Duration(seconds: 32))..repeat();
+  @override
+  void dispose() { controller.dispose(); super.dispose(); }
+  @override
+  Widget build(BuildContext context) {
+    final active = widget.items.where((e) => e.status == 'Downloading').toList();
+    final item = active.isNotEmpty ? active.first : widget.items.first;
+    return Material(
+      color: const Color(0xFF030611),
+      child: Stack(children: [
+        Positioned.fill(child: AnimatedBuilder(animation: controller, builder: (_, __) => CustomPaint(painter: FullGalaxyPainter(controller.value)))),
+        SafeArea(child: Padding(padding: const EdgeInsets.all(22), child: Column(children: [
+          Row(children: [
+            const Icon(Icons.rocket_launch_rounded, color: cyan),
+            const SizedBox(width: 10),
+            const Expanded(child: Text('COSMIC MISSION', style: TextStyle(letterSpacing: 2, fontWeight: FontWeight.w900))),
+            IconButton(onPressed: widget.onClose, icon: const Icon(Icons.close_rounded)),
+          ]),
+          const Spacer(),
+          const Icon(Icons.public_rounded, color: cyan, size: 92),
+          const SizedBox(height: 24),
+          const Text('TRAVELLING THROUGH THE GALAXY', textAlign: TextAlign.center, style: TextStyle(fontSize: 12, letterSpacing: 2, color: Colors.white70)),
+          const SizedBox(height: 14),
+          Text(item.name, maxLines: 2, overflow: TextOverflow.ellipsis, textAlign: TextAlign.center, style: const TextStyle(fontSize: 17, fontWeight: FontWeight.bold)),
+          const SizedBox(height: 25),
+          Text('${(item.progress * 100).round()}%', style: const TextStyle(fontSize: 54, fontWeight: FontWeight.w900, color: cyan)),
+          const SizedBox(height: 12),
+          ClipRRect(borderRadius: BorderRadius.circular(20), child: LinearProgressIndicator(value: item.progress, minHeight: 9, backgroundColor: Colors.white12, color: cyan)),
+          const SizedBox(height: 14),
+          Text(item.status == 'Downloading' ? 'Download engines are working…' : item.status, style: const TextStyle(color: Colors.white70)),
+          const Spacer(),
+          const Text('Keep Cosmic Download open for the live galaxy view.', style: TextStyle(color: Colors.white38, fontSize: 11)),
+        ]))),
+      ]),
+    );
+  }
+}
+
+class FullGalaxyPainter extends CustomPainter {
+  FullGalaxyPainter(this.phase);
+  final double phase;
+  @override
+  void paint(Canvas canvas, Size size) {
+    final center = Offset(size.width * .5, size.height * .46);
+    final rect = Offset.zero & size;
+    canvas.drawRect(rect, Paint()..shader = const LinearGradient(begin: Alignment.topCenter, end: Alignment.bottomCenter, colors: [Color(0xFF101D45), Color(0xFF080A20), Color(0xFF02040D)]).createShader(rect));
+    final nebula = Paint()..shader = RadialGradient(colors: [violet.withValues(alpha: .22), cyan.withValues(alpha: .07), Colors.transparent]).createShader(Rect.fromCircle(center: center, radius: size.width * .72));
+    canvas.drawCircle(center, size.width * .72, nebula);
+    final starRandom = math.Random(804);
+    for (var i = 0; i < 180; i++) {
+      final p = Offset(starRandom.nextDouble() * size.width, starRandom.nextDouble() * size.height);
+      final twinkle = .25 + .65 * ((math.sin(phase * math.pi * 2 + i) + 1) / 2);
+      canvas.drawCircle(p, starRandom.nextDouble() * 1.5 + .35, Paint()..color = Colors.white.withValues(alpha: twinkle));
+    }
+    final sunPaint = Paint()..shader = const RadialGradient(colors: [Color(0xFFFFF6C5), Color(0xFFFFA24C), Color(0x00FF743A)]).createShader(Rect.fromCircle(center: center, radius: 48));
+    canvas.drawCircle(center, 48, sunPaint);
+    final orbitPaint = Paint()..color = cyan.withValues(alpha: .3)..style = PaintingStyle.stroke..strokeWidth = 1;
+    canvas.save();
+    canvas.translate(center.dx, center.dy);
+    canvas.rotate(phase * math.pi * 2);
+    canvas.drawOval(Rect.fromCenter(center: Offset.zero, width: size.width * .66, height: size.width * .22), orbitPaint);
+    canvas.drawOval(Rect.fromCenter(center: Offset.zero, width: size.width * .88, height: size.width * .34), orbitPaint);
+    canvas.drawCircle(Offset(size.width * .33, 0), 12, Paint()..color = cyan);
+    canvas.drawCircle(Offset(-size.width * .43, 0), 8, Paint()..color = violet);
+    canvas.restore();
+    canvas.drawCircle(Offset(size.width * .19, size.height * .22), 19, Paint()..color = const Color(0xFFB7C8E8));
+    canvas.drawCircle(Offset(size.width * .82, size.height * .76), 11, Paint()..color = const Color(0xFFDAA45B));
+  }
+  @override
+  bool shouldRepaint(covariant FullGalaxyPainter oldDelegate) => oldDelegate.phase != phase;
 }
