@@ -400,7 +400,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     item.cancelRequested = true;
     final processId = item.processId;
     try {
-      if (processId != null) await youtubeDL.cancelDownload(processId: processId);
+      if (processId != null) await youtubeDL.cancelDownload(processId);
       if (mounted) setState(() => statusMessage = 'Cancelling download…');
     } catch (_) {
       item.cancelRequested = false;
