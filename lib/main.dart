@@ -3,8 +3,8 @@ import 'dart:io';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
 import 'package:dio/dio.dart';
-import 'package:ffmpeg_kit_flutter_new_audio/ffmpeg_kit.dart';
-import 'package:ffmpeg_kit_flutter_new_audio/return_code.dart';
+import 'package:ffmpeg_kit_flutter_new_full/ffmpeg_kit.dart';
+import 'package:ffmpeg_kit_flutter_new_full/return_code.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -52,8 +52,10 @@ class CosmicApp extends StatelessWidget {
 }
 
 class DownloadItem {
-  DownloadItem(this.name, this.url);
+  DownloadItem(this.name, this.url, {this.quality = 'Original', this.audioOnly = false});
   final String name, url;
+  final String quality;
+  final bool audioOnly;
   final int notificationId = DateTime.now().microsecondsSinceEpoch.remainder(2000000000);
   double progress = 0;
   String status = 'Queued';
@@ -154,8 +156,58 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
       if (mounted) setState(() => statusMessage = 'Enter a valid direct HTTP or HTTPS media link.');
       return;
     }
-    final item = DownloadItem(fileNameFrom(url), url);
-    if (mounted) setState(() { items.insert(0, item); downloading = true; showGalaxy = true; statusMessage = 'Preparing launch sequence…'; tab = 1; });
+    String quality = 'Original';
+    bool audioOnly = false;
+    final choice = await showModalBottomSheet<Map<String, dynamic>>(
+      context: context, isScrollControlled: true, backgroundColor: panel,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(26))),
+      builder: (sheetContext) {
+        String selected = '720p';
+        bool mp3 = false;
+        return StatefulBuilder(builder: (context, refresh) => SafeArea(child: Padding(
+          padding: EdgeInsets.fromLTRB(20, 18, 20, 20 + MediaQuery.of(context).viewInsets.bottom),
+          child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Center(child: Container(width: 42, height: 4, decoration: BoxDecoration(color: Colors.white24, borderRadius: BorderRadius.circular(8)))),
+            const SizedBox(height: 18),
+            const Text('CHOOSE DOWNLOAD FORMAT', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w900, letterSpacing: .8)),
+            const SizedBox(height: 5),
+            const Text('Choose the output size or extract audio as MP3.', style: TextStyle(color: Colors.white60, fontSize: 12)),
+            const SizedBox(height: 16),
+            Wrap(spacing: 8, runSpacing: 8, children: ['Original','1080p','720p','480p','360p'].map((q) =>
+              ChoiceChip(label: Text(q), selected: !mp3 && selected == q,
+                onSelected: (_) => refresh(() { selected = q; mp3 = false; })).toList()),
+            ),
+            const SizedBox(height: 8),
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: const Icon(Icons.music_note_rounded, color: cyan),
+              title: const Text('MP3 audio only'),
+              subtitle: const Text('Extract audio and save as an MP3 file'),
+              trailing: Switch(value: mp3, activeColor: cyan, onChanged: (v) => refresh(() => mp3 = v)),
+              onTap: () => refresh(() => mp3 = !mp3),
+            ),
+            const SizedBox(height: 14),
+            SizedBox(width: double.infinity, child: FilledButton(
+              onPressed: () => Navigator.pop(sheetContext, {'quality': selected, 'mp3': mp3}),
+              child: const Padding(padding: EdgeInsets.symmetric(vertical: 13), child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [Icon(Icons.download_rounded), SizedBox(width: 9), Text('📥  DOWNLOAD', style: TextStyle(fontWeight: FontWeight.w900))],
+              )),
+            )),
+            const SizedBox(height: 8),
+            const Text('Resolution choices re-encode the downloaded source; they cannot create detail that is not in the original.', style: TextStyle(color: Colors.white38, fontSize: 10)),
+          ]),
+        )));
+      },
+    );
+    if (choice == null) return;
+    quality = choice['quality'] as String;
+    audioOnly = choice['mp3'] as bool;
+    final originalName = fileNameFrom(url);
+    final base = originalName.replaceFirst(RegExp(r'\\.[^.]+$'), '');
+    final outputName = audioOnly ? '$base.mp3' : (quality == 'Original' ? originalName : '$base-${quality}.mp4');
+    final item = DownloadItem(outputName, url, quality: quality, audioOnly: audioOnly);
+    if (mounted) setState(() { items.insert(0, item); downloading = true; showGalaxy = true; statusMessage = 'Preparing download…'; tab = 1; });
     if (sound) SystemSound.play(SystemSoundType.click);
     await notifications.show(item.notificationId, 'Cosmic Download', 'Download started: ${item.name}',
       const NotificationDetails(android: AndroidNotificationDetails('cosmic_downloads', 'Downloads', channelDescription: 'Download progress and completion', importance: Importance.low, priority: Priority.low, showProgress: true, maxProgress: 100, progress: 0)));
@@ -238,42 +290,60 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
       final dir = await getApplicationDocumentsDirectory();
       final folder = Directory('${dir.path}/CosmicDownloads');
       if (!await folder.exists()) await folder.create(recursive: true);
-      final safeName = item.name.replaceAll(RegExp(r'[/\\]'), '_');
-      final path = '${folder.path}/$safeName';
+      final sourceName = fileNameFrom(item.url);
+      final rawPath = '${folder.path}/source_${DateTime.now().microsecondsSinceEpoch}_$sourceName';
       item.status = 'Downloading';
-      setState(() {});
+      if (mounted) setState(() {});
       final rangeSize = turbo ? await _rangeDownloadSize(item.url) : null;
       if (rangeSize != null) {
         try {
-          await _downloadInSegments(item, path, rangeSize);
+          await _downloadInSegments(item, rawPath, rangeSize);
         } catch (error) {
           if (error is DioException && CancelToken.isCancel(error)) rethrow;
-          final partial = File(path);
+          final partial = File(rawPath);
           if (await partial.exists()) await partial.delete();
-          await _downloadSingle(item, path);
+          await _downloadSingle(item, rawPath);
         }
       } else {
-        await _downloadSingle(item, path);
+        await _downloadSingle(item, rawPath);
       }
-      final completedFile = File(path);
-      if (!await completedFile.exists() || await completedFile.length() == 0) {
-        throw StateError('The server returned an empty file.');
+      final source = File(rawPath);
+      if (!await source.exists() || await source.length() == 0) throw StateError('Empty download');
+      final finalPath = '${folder.path}/${item.name}';
+      if (item.audioOnly || item.quality != 'Original') {
+        item.status = item.audioOnly ? 'Converting to MP3' : 'Optimizing video';
+        if (mounted) setState(() {});
+        final escapedInput = rawPath.replaceAll("'", "'\\''");
+        final escapedOutput = finalPath.replaceAll("'", "'\\''");
+        final command = item.audioOnly
+          ? "-y -i '$escapedInput' -vn -c:a libmp3lame -b:a 192k '$escapedOutput'"
+          : "-y -i '$escapedInput' -vf \"scale=-2:min(${int.parse(item.quality.replaceAll('p',''))}\\,ih)\" -c:v mpeg4 -q:v 4 -c:a aac -b:a 128k -movflags +faststart '$escapedOutput'";
+        final session = await FFmpegKit.execute(command);
+        final code = await session.getReturnCode();
+        if (!ReturnCode.isSuccess(code) || !await File(finalPath).exists() || await File(finalPath).length() == 0) {
+          final logs = await session.getOutput() ?? 'Media conversion failed';
+          throw StateError(logs.substring(0, math.min(logs.length, 240)));
+        }
+        await source.delete();
+      } else {
+        if (await File(finalPath).exists()) await File(finalPath).delete();
+        await source.rename(finalPath);
       }
-      item.path = path;
-      item.savedLocation = await _publishToDownloads(path, item.name);
+      item.path = finalPath;
+      item.savedLocation = await _publishToDownloads(finalPath, item.name);
       item.progress = 1; item.status = 'Completed';
       if (sound) SystemSound.play(SystemSoundType.alert);
-      await notifications.show(item.notificationId, 'Mission completed!', '${item.name} is ready in CosmicDownloads.',
+      await notifications.show(item.notificationId, 'Mission completed!', '${item.name} is ready in Downloads/Cosmic Download.',
         const NotificationDetails(android: AndroidNotificationDetails('cosmic_downloads', 'Downloads', channelDescription: 'Download progress and completion', importance: Importance.high, priority: Priority.high)));
-      if (mounted) setState(() => statusMessage = 'Mission completed • file saved');
+      if (mounted) setState(() => statusMessage = 'Download ready • tap Play in Downloads');
     } on DioException catch (e) {
       item.status = CancelToken.isCancel(e) ? 'Cancelled' : 'Failed';
       if (mounted) setState(() => statusMessage = item.status == 'Failed' ? 'Download failed: check the direct media link, network or phone storage.' : 'Download cancelled.');
-    } catch (_) {
+    } catch (e) {
       item.status = 'Failed';
-      if (mounted) setState(() => statusMessage = 'Could not save this media file.');
+      if (mounted) setState(() => statusMessage = 'Could not prepare media: ${e.toString().replaceFirst('Bad state: ', '')}');
     } finally {
-      if (mounted) setState(() { downloading = items.any((e) => e.status == 'Downloading'); if (!downloading) showGalaxy = false; });
+      if (mounted) setState(() { downloading = items.any((e) => e.status == 'Downloading' || e.status == 'Converting to MP3' || e.status == 'Optimizing video'); if (!downloading) showGalaxy = false; });
     }
   }
 
@@ -370,12 +440,40 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     if (result?.files.single.path != null) await playVideo(result!.files.single.path!);
   }
   Future<void> playVideo(String path) async {
-    await video?.dispose();
-    final controller = VideoPlayerController.file(File(path));
-    await controller.initialize();
-    await controller.play();
-    if (mounted) setState(() { video = controller; playingName = path.split('/').last; tab = 2; });
+    try {
+      await video?.dispose();
+      final controller = VideoPlayerController.file(File(path));
+      await controller.initialize();
+      controller.setLooping(false);
+      await controller.play();
+      if (mounted) setState(() { video = controller; playingName = path.split(Platform.pathSeparator).last; tab = 2; });
+    } catch (error) {
+      if (mounted) {
+        setState(() => statusMessage = 'This file codec is not supported by the device player.');
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Could not play this video. Try downloading as 720p or 480p for compatibility.')));
+      }
+    }
   }
+
+  Future<void> playDownloaded(DownloadItem item) async {
+    final path = item.path;
+    if (path == null || !await File(path).exists()) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('The downloaded file is not available on this device.')));
+      return;
+    }
+    if (item.audioOnly || item.name.toLowerCase().endsWith('.mp3') || item.name.toLowerCase().endsWith('.m4a')) {
+      try {
+        await audio.setFilePath(path);
+        await audio.play();
+        if (mounted) setState(() { playingName = item.name; tab = 3; });
+      } catch (_) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('This audio file could not be opened.')));
+      }
+    } else {
+      await playVideo(path);
+    }
+  }
+
   Future<void> playAudio() async {
     final result = await FilePicker.platform.pickFiles(type: FileType.audio);
     if (result?.files.single.path == null) return;
@@ -504,6 +602,11 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
       const SizedBox(height: 10), LinearProgressIndicator(value: item.progress, backgroundColor: Colors.white12, color: cyan, minHeight: 6, borderRadius: BorderRadius.circular(9)),
       const SizedBox(height: 8), Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [Text('${(item.progress * 100).round()}%', style: const TextStyle(color: Colors.white60, fontSize: 11)), if (item.status == 'Downloading') TextButton(onPressed: () => cancel(item), child: const Text('Cancel')) else if (item.status == 'Failed') TextButton(onPressed: () => retry(item), child: const Text('Retry')) else if (item.status == 'Completed') const Text('Saved', style: TextStyle(color: Colors.greenAccent, fontSize: 11))]),
       if (item.savedLocation != null) Padding(padding: const EdgeInsets.only(top: 6), child: Text('Phone storage: ${item.savedLocation}', style: const TextStyle(color: Colors.greenAccent, fontSize: 10))),
+      if (item.status == 'Completed') Align(alignment: Alignment.centerRight, child: TextButton.icon(
+        onPressed: () => playDownloaded(item),
+        icon: const Icon(Icons.play_circle_fill_rounded, color: cyan),
+        label: Text(item.audioOnly ? 'Play audio' : 'Play video'),
+      )),
     ]))),
   ]);
 
