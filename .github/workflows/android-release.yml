@@ -33,7 +33,7 @@ jobs:
       - name: Configure Android notification desugaring
         run: |
           sed -i '/compileOptions {/a\        isCoreLibraryDesugaringEnabled = true' android/app/build.gradle.kts
-          sed -i '/dependencies {/a\    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")' android/app/build.gradle.kts
+          printf '\ndependencies {\n    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")\n}\n' >> android/app/build.gradle.kts
       - name: Resolve packages
         run: flutter pub get
       - name: Remove generated template test
