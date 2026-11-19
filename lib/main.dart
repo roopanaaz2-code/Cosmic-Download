@@ -169,13 +169,34 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
       if (mounted) setState(() => statusMessage = 'Enter a valid direct HTTP or HTTPS media link.');
       return;
     }
-    String quality = 'Original';
+    // Resolve the URL with the real yt-dlp extractor before showing format choices.
+    // This prevents the UI from pretending a webpage is a downloadable media file.
+    VideoInfo mediaInfo;
+    try {
+      await _ensureExtractor();
+      mediaInfo = await youtubeDL.getVideoInfo(url);
+    } catch (error) {
+      if (mounted) setState(() => statusMessage = 'Could not inspect this media URL: $error');
+      return;
+    }
+    final availableHeights = (mediaInfo.formats ?? const <VideoFormat?>[])
+        .where((format) => format?.height != null && format!.height! > 0)
+        .map((format) => format!.height!)
+        .toSet()
+        .toList()
+      ..sort((a, b) => b.compareTo(a));
+    final qualityOptions = <String>[
+      'Best available',
+      ...availableHeights.map((height) => '${height}p'),
+    ].toSet().toList();
+
+    String quality = 'Best available';
     bool audioOnly = false;
     final choice = await showModalBottomSheet<Map<String, dynamic>>(
       context: context, isScrollControlled: true, backgroundColor: panel,
       shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(26))),
       builder: (sheetContext) {
-        String selected = '720p';
+        String selected = qualityOptions.first;
         bool mp3 = false;
         return StatefulBuilder(builder: (context, refresh) => SafeArea(child: Padding(
           padding: EdgeInsets.fromLTRB(20, 18, 20, 20 + MediaQuery.of(context).viewInsets.bottom),
@@ -186,7 +207,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
             const SizedBox(height: 5),
             const Text('Choose the output size or extract audio as MP3.', style: TextStyle(color: Colors.white60, fontSize: 12)),
             const SizedBox(height: 16),
-            Wrap(spacing: 8, runSpacing: 8, children: ['Original','1080p','720p','480p','360p'].map((q) =>
+            Wrap(spacing: 8, runSpacing: 8, children: qualityOptions.map((q) =>
               ChoiceChip(label: Text(q), selected: !mp3 && selected == q,
                 onSelected: (_) => refresh(() { selected = q; mp3 = false; }))).toList(),
             ),
@@ -216,9 +237,9 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     if (choice == null) return;
     quality = choice['quality'] as String;
     audioOnly = choice['mp3'] as bool;
-    final originalName = fileNameFrom(url);
+    final originalName = (mediaInfo.title?.trim().isNotEmpty == true ? mediaInfo.title!.trim() : fileNameFrom(url)).replaceAll(RegExp(r'[^a-zA-Z0-9._ -]'), '_');
     final base = originalName.replaceFirst(RegExp(r'\.[^.]+$'), '');
-    final outputName = audioOnly ? '$base.mp3' : (quality == 'Original' ? originalName : '$base-${quality}.mp4');
+    final outputName = audioOnly ? '$base.mp3' : '$base-${quality == 'Best available' ? 'best' : quality}.mp4';
     final item = DownloadItem(outputName, url, quality: quality, audioOnly: audioOnly);
     if (mounted) setState(() { items.insert(0, item); downloading = true; showGalaxy = true; statusMessage = 'Preparing download…'; tab = 1; });
     if (sound) SystemSound.play(SystemSoundType.click);
@@ -307,13 +328,10 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
       if (mounted) setState(() {});
       await _ensureExtractor();
       final processId = 'cosmic_${DateTime.now().microsecondsSinceEpoch}';
-      final format = switch (item.quality) {
-        '1080p' => 'bestvideo[height<=1080]+bestaudio/best[height<=1080]',
-        '720p' => 'bestvideo[height<=720]+bestaudio/best[height<=720]',
-        '480p' => 'bestvideo[height<=480]+bestaudio/best[height<=480]',
-        '360p' => 'bestvideo[height<=360]+bestaudio/best[height<=360]',
-        _ => 'bestvideo+bestaudio/best',
-      };
+      final requestedHeight = int.tryParse(item.quality.replaceAll('p', ''));
+      final format = requestedHeight == null
+          ? 'bestvideo+bestaudio/best'
+          : 'bestvideo[height<=$requestedHeight]+bestaudio/best[height<=$requestedHeight]';
       final progressSubscription = youtubeDL.onProgress.listen((progress) {
         if (progress.processId == processId && mounted) {
           setState(() => item.progress = (progress.progress / 100).clamp(0.0, 1.0).toDouble());
