@@ -71,7 +71,7 @@ jobs:
           printf '\ndependencies {\n    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")\n}\n' >> android/app/build.gradle.kts
       - name: Configure native library packaging
         run: |
-          sed -i '/android:extractNativeLibs=/d' android/app/src/main/AndroidManifest.xml
+          grep -q 'android:extractNativeLibs="true"' android/app/src/main/AndroidManifest.xml
           sed -i '/^android {/a\\    packaging { jniLibs { useLegacyPackaging = true } }' android/app/build.gradle.kts
       - name: Resolve packages
         run: flutter pub get

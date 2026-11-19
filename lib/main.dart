@@ -80,12 +80,31 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
   bool browserLoading = false, converting = false;
   final youtubeDL = YoutubeDLFlutter.instance;
   bool extractorInitialized = false;
+  Future<void>? _extractorInitialization;
+  bool resolvingLink = false;
 
   Future<void> _ensureExtractor() async {
     if (extractorInitialized) return;
-    final initialized = await youtubeDL.initialize(enableFFmpeg: true, enableAria2c: false);
-    if (!initialized.success) {
-      throw StateError(initialized.errorMessage ?? 'Media extraction engine could not initialize.');
+    final pending = _extractorInitialization;
+    if (pending != null) {
+      await pending;
+      return;
+    }
+    final initialization = _initializeExtractor();
+    _extractorInitialization = initialization;
+    try {
+      await initialization;
+    } finally {
+      if (identical(_extractorInitialization, initialization)) {
+        _extractorInitialization = null;
+      }
+    }
+  }
+
+  Future<void> _initializeExtractor() async {
+    final result = await youtubeDL.initialize(enableFFmpeg: true, enableAria2c: false);
+    if (!result.success) {
+      throw StateError(result.errorMessage ?? 'Media extraction engine could not initialize.');
     }
     extractorInitialized = true;
   }
@@ -172,88 +191,105 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
   }
 
   Future<void> _startDownload(String url) async {
+    if (resolvingLink) return;
     final uri = Uri.tryParse(url);
     if (uri == null || !{'http', 'https'}.contains(uri.scheme) || uri.host.isEmpty) {
       if (mounted) setState(() => statusMessage = 'Enter a valid public video/audio page or direct media link.');
       return;
     }
-    // Resolve supported public pages and direct media links with the bundled yt-dlp engine.
-    VideoInfo mediaInfo;
+    if (mounted) setState(() { resolvingLink = true; statusMessage = 'Inspecting media link…'; });
     try {
+      // Resolve supported public pages and direct media links with the bundled yt-dlp engine.
       await _ensureExtractor();
-      mediaInfo = await youtubeDL.getVideoInfo(url);
-    } catch (error) {
-      if (mounted) setState(() => statusMessage = 'Could not inspect this link. It may be unsupported, unavailable, or require sign-in. $error');
-      return;
-    }
-    final availableHeights = (mediaInfo.formats ?? const [])
-        .map((format) => (format as dynamic).height as int?)
-        .whereType<int>()
-        .where((height) => height > 0)
-        .toSet()
-        .toList()
-      ..sort((a, b) => b.compareTo(a));
-    final qualityOptions = <String>[
-      'Best available',
-      ...availableHeights.map((height) => '${height}p'),
-    ].toSet().toList();
+      final mediaInfo = await youtubeDL.getVideoInfo(url);
+      final heightSet = <int>{};
+      for (final format in mediaInfo.formats ?? const <VideoFormat?>[]) {
+        final height = format?.height;
+        if (height != null && height > 0) heightSet.add(height);
+      }
+      final availableHeights = heightSet.toList()..sort((a, b) => b.compareTo(a));
+      final qualityOptions = <String>[
+        'Best available',
+        ...availableHeights.map((height) => '${height}p'),
+      ].toSet().toList();
 
-    String quality = 'Best available';
-    bool audioOnly = false;
-    final choice = await showModalBottomSheet<Map<String, dynamic>>(
-      context: context, isScrollControlled: true, backgroundColor: panel,
-      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(26))),
-      builder: (sheetContext) {
-        String selected = qualityOptions.first;
-        bool mp3 = false;
-        return StatefulBuilder(builder: (context, refresh) => SafeArea(child: Padding(
-          padding: EdgeInsets.fromLTRB(20, 18, 20, 20 + MediaQuery.of(context).viewInsets.bottom),
-          child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Center(child: Container(width: 42, height: 4, decoration: BoxDecoration(color: Colors.white24, borderRadius: BorderRadius.circular(8)))),
-            const SizedBox(height: 18),
-            const Text('CHOOSE DOWNLOAD FORMAT', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w900, letterSpacing: .8)),
-            const SizedBox(height: 5),
-            const Text('Choose the output size or extract audio as MP3.', style: TextStyle(color: Colors.white60, fontSize: 12)),
-            const SizedBox(height: 16),
-            Wrap(spacing: 8, runSpacing: 8, children: qualityOptions.map((q) =>
-              ChoiceChip(label: Text(q), selected: !mp3 && selected == q,
-                onSelected: (_) => refresh(() { selected = q; mp3 = false; }))).toList(),
-            ),
-            const SizedBox(height: 8),
-            ListTile(
-              contentPadding: EdgeInsets.zero,
-              leading: const Icon(Icons.music_note_rounded, color: cyan),
-              title: const Text('MP3 audio only'),
-              subtitle: const Text('Extract audio and save as an MP3 file'),
-              trailing: Switch(value: mp3, activeColor: cyan, onChanged: (v) => refresh(() => mp3 = v)),
-              onTap: () => refresh(() => mp3 = !mp3),
-            ),
-            const SizedBox(height: 14),
-            SizedBox(width: double.infinity, child: FilledButton(
-              onPressed: () => Navigator.pop(sheetContext, {'quality': selected, 'mp3': mp3}),
-              child: const Padding(padding: EdgeInsets.symmetric(vertical: 13), child: Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [Icon(Icons.download_rounded), SizedBox(width: 9), Text('📥  DOWNLOAD', style: TextStyle(fontWeight: FontWeight.w900))],
+      if (!mounted) return;
+      final choice = await showModalBottomSheet<Map<String, dynamic>>(
+        context: context, isScrollControlled: true, backgroundColor: panel,
+        shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(26))),
+        builder: (sheetContext) {
+          String selected = qualityOptions.first;
+          bool mp3 = false;
+          return StatefulBuilder(builder: (context, refresh) => SafeArea(child: Padding(
+            padding: EdgeInsets.fromLTRB(20, 18, 20, 20 + MediaQuery.of(context).viewInsets.bottom),
+            child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Center(child: Container(width: 42, height: 4, decoration: BoxDecoration(color: Colors.white24, borderRadius: BorderRadius.circular(8)))),
+              const SizedBox(height: 18),
+              const Text('CHOOSE DOWNLOAD FORMAT', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w900, letterSpacing: .8)),
+              const SizedBox(height: 5),
+              const Text('Choose the best available resolution or extract audio as MP3.', style: TextStyle(color: Colors.white60, fontSize: 12)),
+              const SizedBox(height: 16),
+              Wrap(spacing: 8, runSpacing: 8, children: qualityOptions.map((q) =>
+                ChoiceChip(label: Text(q), selected: !mp3 && selected == q,
+                  onSelected: (_) => refresh(() { selected = q; mp3 = false; }))).toList(),
+              ),
+              const SizedBox(height: 8),
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: const Icon(Icons.music_note_rounded, color: cyan),
+                title: const Text('MP3 audio only'),
+                subtitle: const Text('Extract audio and save as an MP3 file'),
+                trailing: Switch(value: mp3, activeColor: cyan, onChanged: (v) => refresh(() => mp3 = v)),
+                onTap: () => refresh(() => mp3 = !mp3),
+              ),
+              const SizedBox(height: 14),
+              SizedBox(width: double.infinity, child: FilledButton(
+                onPressed: () => Navigator.pop(sheetContext, {'quality': selected, 'mp3': mp3}),
+                child: const Padding(padding: EdgeInsets.symmetric(vertical: 13), child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [Icon(Icons.download_rounded), SizedBox(width: 9), Text('DOWNLOAD', style: TextStyle(fontWeight: FontWeight.w900))],
+                )),
               )),
-            )),
-            const SizedBox(height: 8),
-            const Text('Resolution choices re-encode the downloaded source; they cannot create detail that is not in the original.', style: TextStyle(color: Colors.white38, fontSize: 10)),
-          ]),
-        )));
-      },
-    );
-    if (choice == null) return;
-    quality = choice['quality'] as String;
-    audioOnly = choice['mp3'] as bool;
-    final originalName = (mediaInfo.title?.trim().isNotEmpty == true ? mediaInfo.title!.trim() : fileNameFrom(url)).replaceAll(RegExp(r'[^a-zA-Z0-9._ -]'), '_');
-    final base = originalName.replaceFirst(RegExp(r'\.[^.]+$'), '');
-    final outputName = audioOnly ? '$base.mp3' : '$base-${quality == 'Best available' ? 'best' : quality}.mp4';
-    final item = DownloadItem(outputName, url, quality: quality, audioOnly: audioOnly);
-    if (mounted) setState(() { items.insert(0, item); downloading = true; showGalaxy = true; statusMessage = 'Preparing download…'; tab = 1; });
-    if (sound) SystemSound.play(SystemSoundType.click);
-    await notifications.show(item.notificationId, 'Cosmic Download', 'Download started: ${item.name}',
-      const NotificationDetails(android: AndroidNotificationDetails('cosmic_downloads', 'Downloads', channelDescription: 'Download progress and completion', importance: Importance.low, priority: Priority.low, showProgress: true, maxProgress: 100, progress: 0)));
-    await _download(item);
+              const SizedBox(height: 8),
+              const Text('Resolution options are limited to formats provided by the source.', style: TextStyle(color: Colors.white38, fontSize: 10)),
+            ]),
+          )));
+        },
+      );
+      if (choice == null || !mounted) return;
+      final quality = choice['quality'] as String;
+      final audioOnly = choice['mp3'] as bool;
+      final originalName = (mediaInfo.title?.trim().isNotEmpty == true ? mediaInfo.title!.trim() : fileNameFrom(url)).replaceAll(RegExp(r'[^a-zA-Z0-9._ -]'), '_');
+      final base = originalName.replaceFirst(RegExp(r'\.[^.]+$'), '');
+      final outputName = audioOnly ? '$base.mp3' : '$base-${quality == 'Best available' ? 'best' : quality}.mp4';
+      final item = DownloadItem(outputName, url, quality: quality, audioOnly: audioOnly);
+      setState(() {
+        resolvingLink = false;
+        items.insert(0, item);
+        downloading = true;
+        showGalaxy = true;
+        statusMessage = 'Preparing download…';
+        tab = 1;
+      });
+      if (sound) SystemSound.play(SystemSoundType.click);
+      try {
+        await notifications.show(item.notificationId, 'Cosmic Download', 'Download started: ${item.name}',
+          const NotificationDetails(android: AndroidNotificationDetails('cosmic_downloads', 'Downloads', channelDescription: 'Download progress and completion', importance: Importance.low, priority: Priority.low, showProgress: true, maxProgress: 100, progress: 0)));
+      } catch (error, stackTrace) {
+        debugPrint('Could not show the download notification: $error\n$stackTrace');
+      }
+      await _download(item);
+    } catch (error, stackTrace) {
+      debugPrint('Download setup failed: $error\n$stackTrace');
+      if (mounted) {
+        final detail = error.toString().replaceFirst('Bad state: ', '');
+        final message = 'Could not start this download: $detail';
+        setState(() => statusMessage = message);
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
+      }
+    } finally {
+      if (mounted && resolvingLink) setState(() => resolvingLink = false);
+    }
   }
 
   Future<void> searchInBrowser() async {
@@ -518,7 +554,13 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     TextField(controller: urlController, keyboardType: TextInputType.url, decoration: const InputDecoration(hintText: 'Paste a supported public video/audio page or file link', prefixIcon: Icon(Icons.link_rounded),)),
     const SizedBox(height: 10),
     Row(children: [
-      Expanded(child: FilledButton.icon(onPressed: startDownload, icon: const Icon(Icons.rocket_launch_rounded), label: const Text('DOWNLOAD'))),
+      Expanded(child: FilledButton.icon(
+        onPressed: resolvingLink ? null : startDownload,
+        icon: resolvingLink
+            ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
+            : const Icon(Icons.rocket_launch_rounded),
+        label: Text(resolvingLink ? 'INSPECTING LINK…' : 'DOWNLOAD'),
+      )),
       const SizedBox(width: 8),
       OutlinedButton(onPressed: openBrowserSearch, child: const Icon(Icons.search_rounded)),
     ]),
