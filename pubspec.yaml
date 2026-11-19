@@ -16,7 +16,7 @@ dependencies:
   file_picker: ^10.1.2
   url_launcher: ^6.3.1
   webview_flutter: ^4.14.1
-  ffmpeg_kit_flutter_new_audio: ^2.5.3
+  ffmpeg_kit_flutter_new_full: ^2.5.3
 dev_dependencies:
   flutter_test:
     sdk: flutter
