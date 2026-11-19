@@ -328,10 +328,14 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
       if (mounted) setState(() => statusMessage = 'Download ready • tap Play in Downloads');
     } on DioException catch (e) {
       item.status = CancelToken.isCancel(e) ? 'Cancelled' : 'Failed';
-      if (mounted) setState(() => statusMessage = item.status == 'Failed' ? 'Download failed: check the direct media link, network or phone storage.' : 'Download cancelled.');
+      item.error = item.status == 'Failed'
+        ? (e.response?.statusCode != null ? 'HTTP ${e.response!.statusCode}: ${e.message ?? 'Request rejected'}' : (e.message ?? e.type.name))
+        : null;
+      if (mounted) setState(() => statusMessage = item.status == 'Failed' ? 'Download failed: ${item.error}' : 'Download cancelled.');
     } catch (e) {
       item.status = 'Failed';
-      if (mounted) setState(() => statusMessage = 'Could not prepare media: ${e.toString().replaceFirst('Bad state: ', '')}');
+      item.error = e.toString().replaceFirst('Bad state: ', '');
+      if (mounted) setState(() => statusMessage = 'Download failed: ${item.error}');
     } finally {
       if (mounted) setState(() { downloading = items.any((e) => e.status == 'Downloading' || e.status == 'Converting to MP3' || e.status == 'Optimizing video'); if (!downloading) showGalaxy = false; });
     }
@@ -614,6 +618,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
       const SizedBox(height: 10), LinearProgressIndicator(value: item.progress, backgroundColor: Colors.white12, color: cyan, minHeight: 6, borderRadius: BorderRadius.circular(9)),
       const SizedBox(height: 8), Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [Text('${(item.progress * 100).round()}%', style: const TextStyle(color: Colors.white60, fontSize: 11)), if (item.status == 'Downloading') TextButton(onPressed: () => cancel(item), child: const Text('Cancel')) else if (item.status == 'Failed') TextButton(onPressed: () => retry(item), child: const Text('Retry')) else if (item.status == 'Completed') const Text('Saved', style: TextStyle(color: Colors.greenAccent, fontSize: 11))]),
       if (item.savedLocation != null) Padding(padding: const EdgeInsets.only(top: 6), child: Text('Phone storage: ${item.savedLocation}', style: const TextStyle(color: Colors.greenAccent, fontSize: 10))),
+      if (item.status == 'Failed') Padding(padding: const EdgeInsets.only(top: 6), child: Text(item.error ?? 'Check the link and try again.', style: const TextStyle(color: Colors.orangeAccent, fontSize: 11))),
       if (item.status == 'Completed') Align(alignment: Alignment.centerRight, child: TextButton.icon(
         onPressed: () => playDownloaded(item),
         icon: const Icon(Icons.play_circle_fill_rounded, color: cyan),
