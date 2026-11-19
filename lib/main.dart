@@ -21,6 +21,8 @@ Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   const android = AndroidInitializationSettings('@mipmap/ic_launcher');
   await notifications.initialize(const InitializationSettings(android: android));
+  final androidNotifications = notifications.resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>();
+  await androidNotifications?.requestNotificationsPermission();
   runApp(const CosmicApp());
 }
 
@@ -47,6 +49,7 @@ class CosmicApp extends StatelessWidget {
 class DownloadItem {
   DownloadItem(this.name, this.url);
   final String name, url;
+  final int notificationId = DateTime.now().microsecondsSinceEpoch.remainder(2000000000);
   double progress = 0;
   String status = 'Queued';
   String? path;
@@ -98,7 +101,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     final item = DownloadItem(fileNameFrom(url), url);
     setState(() { items.insert(0, item); downloading = true; showGalaxy = true; statusMessage = 'Preparing launch sequence…'; tab = 1; });
     if (sound) SystemSound.play(SystemSoundType.click);
-    await notifications.show(1001, 'Cosmic Download', 'Download started: ${item.name}',
+    await notifications.show(item.notificationId, 'Cosmic Download', 'Download started: ${item.name}',
       const NotificationDetails(android: AndroidNotificationDetails('cosmic_downloads', 'Downloads', channelDescription: 'Download progress and completion', importance: Importance.low, priority: Priority.low, showProgress: true, maxProgress: 100, progress: 0)));
     await _download(item);
   }
@@ -118,7 +121,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
         onReceiveProgress: (received, total) {
           if (total > 0) item.progress = received / total;
           setState(() {});
-          notifications.show(1001, 'Cosmic Download', '${(item.progress * 100).round()}% • ${item.name}',
+          notifications.show(item.notificationId, 'Cosmic Download', '${(item.progress * 100).round()}% • ${item.name}',
             NotificationDetails(android: AndroidNotificationDetails('cosmic_downloads', 'Downloads', channelDescription: 'Download progress and completion', importance: Importance.low, priority: Priority.low, showProgress: true, maxProgress: 100, progress: (item.progress * 100).round())));
         });
       item.path = path; item.progress = 1; item.status = 'Completed';
@@ -214,7 +217,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     TextField(controller: urlController, keyboardType: TextInputType.url, decoration: const InputDecoration(hintText: 'Paste a direct video or audio URL', prefixIcon: Icon(Icons.link_rounded),)),
     const SizedBox(height: 10),
     Row(children: [
-      Expanded(child: FilledButton.icon(onPressed: downloading ? null : startDownload, icon: const Icon(Icons.rocket_launch_rounded), label: const Text('DOWNLOAD'))),
+      Expanded(child: FilledButton.icon(onPressed: startDownload, icon: const Icon(Icons.rocket_launch_rounded), label: const Text('DOWNLOAD'))),
       const SizedBox(width: 8),
       OutlinedButton(onPressed: openBrowserSearch, child: const Icon(Icons.search_rounded)),
     ]),
