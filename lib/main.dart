@@ -409,7 +409,6 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
   ]);
 
   String _fmt(Duration d) => '${d.inMinutes.toString().padLeft(2, '0')}:${(d.inSeconds % 60).toString().padLeft(2, '0')}';
-  void _message(String s) => ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(s)));
 }
 
 class GalaxyPainter extends CustomPainter {
