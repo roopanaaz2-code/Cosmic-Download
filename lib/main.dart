@@ -80,7 +80,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
   final dio = Dio(BaseOptions(connectTimeout: const Duration(seconds: 25), receiveTimeout: const Duration(minutes: 0)));
   final items = <DownloadItem>[];
   final audio = AudioPlayer();
-  bool sound = false, turbo = true, downloading = false, showGalaxy = false;
+  bool sound = false, downloading = false, showGalaxy = false;
   String statusMessage = 'Ready for your next mission';
   int tab = 0;
   VideoPlayerController? video;
