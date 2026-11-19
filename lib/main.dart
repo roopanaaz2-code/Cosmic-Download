@@ -355,32 +355,6 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
         const NotificationDetails(android: AndroidNotificationDetails('cosmic_downloads', 'Downloads', channelDescription: 'Download progress and completion', importance: Importance.high, priority: Priority.high)));
       if (mounted) setState(() => statusMessage = 'Download ready • tap Play in Downloads');
       return;
-      if (item.audioOnly || item.quality != 'Original') {
-        item.status = item.audioOnly ? 'Converting to MP3' : 'Optimizing video';
-        if (mounted) setState(() {});
-        final escapedInput = rawPath.replaceAll("'", "'\\''");
-        final escapedOutput = finalPath.replaceAll("'", "'\\''");
-        final command = item.audioOnly
-          ? "-y -i '$escapedInput' -vn -c:a libmp3lame -b:a 192k '$escapedOutput'"
-          : "-y -i '$escapedInput' -vf \"scale=-2:min(${int.parse(item.quality.replaceAll('p',''))}\\,ih)\" -c:v libx264 -preset ultrafast -crf 23 -pix_fmt yuv420p -profile:v baseline -level 3.1 -c:a aac -b:a 128k -movflags +faststart '$escapedOutput'";
-        final session = await FFmpegKit.execute(command);
-        final code = await session.getReturnCode();
-        if (!ReturnCode.isSuccess(code) || !await File(finalPath).exists() || await File(finalPath).length() == 0) {
-          final logs = await session.getOutput() ?? 'Media conversion failed';
-          throw StateError(logs.substring(0, math.min(logs.length, 240)));
-        }
-        await source.delete();
-      } else {
-        if (await File(finalPath).exists()) await File(finalPath).delete();
-        await source.rename(finalPath);
-      }
-      item.path = finalPath;
-      item.savedLocation = await _publishToDownloads(finalPath, item.name);
-      item.progress = 1; item.status = 'Completed';
-      if (sound) SystemSound.play(SystemSoundType.alert);
-      await notifications.show(item.notificationId, 'Mission completed!', '${item.name} is ready in Downloads/Cosmic Download.',
-        const NotificationDetails(android: AndroidNotificationDetails('cosmic_downloads', 'Downloads', channelDescription: 'Download progress and completion', importance: Importance.high, priority: Priority.high)));
-      if (mounted) setState(() => statusMessage = 'Download ready • tap Play in Downloads');
     } on DioException catch (e) {
       item.status = CancelToken.isCancel(e) ? 'Cancelled' : 'Failed';
       item.error = item.status == 'Failed'
