@@ -12,7 +12,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:path_provider/path_provider.dart';
-import 'package:video_player/video_player.dart';
+import 'package:video_player/video_player.dart' hide VideoFormat;
 import 'package:webview_flutter/webview_flutter.dart';
 
 const bg = Color(0xFF050817);
@@ -179,9 +179,10 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
       if (mounted) setState(() => statusMessage = 'Could not inspect this media URL: $error');
       return;
     }
-    final availableHeights = (mediaInfo.formats ?? const <VideoFormat?>[])
-        .where((format) => format?.height != null && format!.height! > 0)
-        .map((format) => format!.height!)
+    final availableHeights = (mediaInfo.formats ?? const [])
+        .map((format) => (format as dynamic).height as int?)
+        .whereType<int>()
+        .where((height) => height > 0)
         .toSet()
         .toList()
       ..sort((a, b) => b.compareTo(a));
