@@ -29,7 +29,7 @@ jobs:
         run: flutter create --platforms=android --org com.cosmicdownload --project-name cosmic_download .
       - name: Restore app sources and Android manifest
         run: |
-          git checkout HEAD -- lib/main.dart pubspec.yaml android/app/src/main/AndroidManifest.xml
+          git checkout HEAD -- lib/main.dart pubspec.yaml android/app/src/main/AndroidManifest.xml android/app/src/main/kotlin/com/cosmicdownload/cosmic_download/MainActivity.kt
       - name: Configure Android notification desugaring
         run: |
           sed -i '/compileOptions {/a\        isCoreLibraryDesugaringEnabled = true' android/app/build.gradle.kts
