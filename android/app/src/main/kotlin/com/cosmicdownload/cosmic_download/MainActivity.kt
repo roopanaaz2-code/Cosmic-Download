@@ -43,7 +43,7 @@ class MainActivity : FlutterActivity() {
                     saveWithMediaStore(source, name, mime, result)
                 } else if (ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE)
                     == PackageManager.PERMISSION_GRANTED) {
-                    saveLegacy(source, name, result)
+                    saveLegacy(source, name, mime, result)
                 } else {
                     pendingSave = Triple(source, name, mime)
                     pendingResult = result
@@ -54,51 +54,64 @@ class MainActivity : FlutterActivity() {
                     )
                 }
             }
-    }
-
-    private fun saveWithMediaStore(source: String, name: String, mime: String, result: MethodChannel.Result) {
+     private fun saveWithMediaStore(source: String, name: String, mime: String, result: MethodChannel.Result) {
         var uri: Uri? = null
         try {
+            val isVideo = mime.startsWith("video/")
+            val isAudio = mime.startsWith("audio/")
+            val collection = when {
+                isVideo -> MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+                isAudio -> MediaStore.Audio.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+                else -> MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL)
+            }
+            val relativeFolder = when {
+                isVideo -> Environment.DIRECTORY_MOVIES + "/Cosmic Download"
+                isAudio -> Environment.DIRECTORY_MUSIC + "/Cosmic Download"
+                else -> Environment.DIRECTORY_DOWNLOADS + "/Cosmic Download"
+            }
             val values = ContentValues().apply {
                 put(MediaStore.MediaColumns.DISPLAY_NAME, name)
                 put(MediaStore.MediaColumns.MIME_TYPE, mime)
-                put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/Cosmic Download")
+                put(MediaStore.MediaColumns.RELATIVE_PATH, relativeFolder)
                 put(MediaStore.MediaColumns.IS_PENDING, 1)
             }
-            uri = contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
-                ?: throw IllegalStateException("Android could not create the Downloads file.")
+            uri = contentResolver.insert(collection, values)
+                ?: throw IllegalStateException("Android could not create the media-library entry.")
             contentResolver.openOutputStream(uri, "w").use { output ->
-                if (output == null) throw IllegalStateException("Could not open the Downloads destination.")
+                if (output == null) throw IllegalStateException("Could not open the phone storage destination.")
                 FileInputStream(File(source)).use { input -> input.copyTo(output) }
                 output.flush()
             }
             val ready = ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }
             contentResolver.update(uri, ready, null, null)
-            result.success("Downloads/Cosmic Download/$name")
+            result.success("$relativeFolder/$name")
         } catch (error: Exception) {
             uri?.let { contentResolver.delete(it, null, null) }
-            result.error("SAVE_FAILED", error.message ?: "Could not save to Downloads.", null)
+            result.error("SAVE_FAILED", error.message ?: "Could not save media to the phone.", null)
         }
     }
 
-    private fun saveLegacy(source: String, name: String, result: MethodChannel.Result) {
+    private fun saveLegacy(source: String, name: String, mime: String, result: MethodChannel.Result) {
         try {
-            val folder = File(
-                Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
-                "Cosmic Download"
-            )
+            val parent = when {
+                mime.startsWith("video/") -> Environment.DIRECTORY_MOVIES
+                mime.startsWith("audio/") -> Environment.DIRECTORY_MUSIC
+                else -> Environment.DIRECTORY_DOWNLOADS
+            }
+            val folder = File(Environment.getExternalStoragePublicDirectory(parent), "Cosmic Download")
             if (!folder.exists() && !folder.mkdirs()) {
-                throw IllegalStateException("Could not create the Downloads folder.")
+                throw IllegalStateException("Could not create the public media folder.")
             }
             val destination = File(folder, name)
             FileInputStream(File(source)).use { input ->
                 FileOutputStream(destination).use { output -> input.copyTo(output) }
             }
-            MediaScannerConnection.scanFile(this, arrayOf(destination.absolutePath), null, null)
-            result.success("Downloads/Cosmic Download/$name")
+            MediaScannerConnection.scanFile(this, arrayOf(destination.absolutePath), arrayOf(mime), null)
+            result.success("$parent/Cosmic Download/$name")
         } catch (error: Exception) {
-            result.error("SAVE_FAILED", error.message ?: "Could not save to Downloads.", null)
+            result.error("SAVE_FAILED", error.message ?: "Could not save media to the phone.", null)
         }
+    }
     }
 
     override fun onRequestPermissionsResult(
@@ -114,7 +127,7 @@ class MainActivity : FlutterActivity() {
         pendingResult = null
         if (args == null || result == null) return
         if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
-            saveLegacy(args.first, args.second, result)
+            saveLegacy(args.first, args.second, args.third, result)
         } else {
             result.error("STORAGE_PERMISSION_DENIED", "Storage permission is required to save into Downloads.", null)
         }
