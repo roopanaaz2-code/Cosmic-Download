@@ -30,6 +30,14 @@ jobs:
       - name: Restore app sources and Android manifest
         run: |
           git checkout HEAD -- lib/main.dart pubspec.yaml android/app/src/main/AndroidManifest.xml android/app/src/main/kotlin/com/cosmicdownload/cosmic_download/MainActivity.kt
+      - name: Apply uploaded frog launcher icon
+        run: |
+          mkdir -p android/app/src/main/res/mipmap-mdpi android/app/src/main/res/mipmap-hdpi android/app/src/main/res/mipmap-xhdpi android/app/src/main/res/mipmap-xxhdpi android/app/src/main/res/mipmap-xxxhdpi
+          for spec in "mdpi 48" "hdpi 72" "xhdpi 96" "xxhdpi 144" "xxxhdpi 192"; do
+            set -- $spec
+            convert assets/cosmic_icon.jpg -resize "${2}x${2}^" -gravity center -extent "${2}x${2}" -strip "android/app/src/main/res/mipmap-${1}/ic_launcher.png"
+          done
+          rm -f android/app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml android/app/src/main/res/mipmap-anydpi-v26/ic_launcher_round.xml
       - name: Configure Android notification desugaring
         run: |
           sed -i '/compileOptions {/a\        isCoreLibraryDesugaringEnabled = true' android/app/build.gradle.kts
