@@ -10,7 +10,6 @@ import 'package:flutter/services.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:path_provider/path_provider.dart';
-import 'package:url_launcher/url_launcher.dart';
 import 'package:video_player/video_player.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 
@@ -201,7 +200,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
         if (sound) SystemSound.play(SystemSoundType.alert);
       } else {
         final logs = await session.getOutput() ?? 'Unsupported or protected audio stream.';
-        if (mounted) setState(() => statusMessage = 'Conversion failed: ${logs.substring(0, math.min(logs.length, 90))}');
+        if (mounted) setState(() => statusMessage = 'Conversion failed: ${logs.substring(0, (logs.length > 90 ? 90 : logs.length))}');
       }
     } catch (_) {
       if (mounted) setState(() => statusMessage = 'Could not convert this video to MP3.');
@@ -266,9 +265,9 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     if (mounted) setState(() { playingName = result.files.single.name; tab = 3; });
   }
   Future<void> openBrowserSearch() async {
-    final q = Uri.encodeComponent(urlController.text.trim());
-    final uri = Uri.parse('https://www.google.com/search?q=$q');
-    await launchUrl(uri, mode: LaunchMode.externalApplication);
+    browserAddressController.text = urlController.text.trim();
+    setState(() => tab = 4);
+    if (browserAddressController.text.isNotEmpty) await searchInBrowser();
   }
 
   @override
