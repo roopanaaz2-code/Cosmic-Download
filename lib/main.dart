@@ -61,6 +61,7 @@ class DownloadItem {
   String status = 'Queued';
   String? path;
   String? savedLocation;
+  String? error;
   CancelToken? cancelToken;
 }
 
