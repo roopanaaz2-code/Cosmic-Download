@@ -8,7 +8,6 @@ dependencies:
   flutter:
     sdk: flutter
   cupertino_icons: ^1.0.8
-  dio: ^5.8.0+1
   extractor: ^1.0.0
   path_provider: ^2.1.5
   flutter_local_notifications: ^19.0.0

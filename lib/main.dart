@@ -2,7 +2,6 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
-import 'package:dio/dio.dart';
 import 'package:extractor/extractor.dart';
 import 'package:ffmpeg_kit_flutter_new_full/ffmpeg_kit.dart';
 import 'package:ffmpeg_kit_flutter_new_full/return_code.dart';
@@ -63,7 +62,8 @@ class DownloadItem {
   String? path;
   String? savedLocation;
   String? error;
-  CancelToken? cancelToken;
+  String? processId;
+  bool cancelRequested = false;
 }
 
 class HomePage extends StatefulWidget {
@@ -78,7 +78,6 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
   late final WebViewController browserController;
   String browserPlatform = 'Web';
   bool browserLoading = false, converting = false;
-  final dio = Dio(BaseOptions(connectTimeout: const Duration(seconds: 25), receiveTimeout: const Duration(minutes: 0)));
   final youtubeDL = YoutubeDLFlutter.instance;
   bool extractorInitialized = false;
 
@@ -138,13 +137,22 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
 
   Future<String> _publishToDownloads(String sourcePath, String name) async {
     final lower = name.toLowerCase();
-    final mime = lower.endsWith('.mp3') ? 'audio/mpeg'
-        : lower.endsWith('.m4a') ? 'audio/mp4'
-        : lower.endsWith('.webm') ? 'video/webm'
-        : lower.endsWith('.mkv') ? 'video/x-matroska'
-        : lower.endsWith('.mov') ? 'video/quicktime'
-        : lower.endsWith('.mp4') ? 'video/mp4'
-        : 'application/octet-stream';
+    final mime = switch (lower.split('.').last) {
+      'mp3' => 'audio/mpeg',
+      'm4a' => 'audio/mp4',
+      'aac' => 'audio/aac',
+      'wav' => 'audio/wav',
+      'ogg' || 'opus' => 'audio/ogg',
+      'flac' => 'audio/flac',
+      'webm' => 'video/webm',
+      'mkv' => 'video/x-matroska',
+      'mov' => 'video/quicktime',
+      'avi' => 'video/x-msvideo',
+      'flv' => 'video/x-flv',
+      '3gp' => 'video/3gpp',
+      'm4v' || 'mp4' => 'video/mp4',
+      _ => 'application/octet-stream',
+    };
     final location = await storageChannel.invokeMethod<String>('saveToDownloads', {
       'sourcePath': sourcePath, 'fileName': name, 'mimeType': mime,
     });
@@ -160,23 +168,22 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     final uri = Uri.tryParse(value);
     if (uri == null) return false;
     final path = uri.path.toLowerCase();
-    return RegExp(r'\.(mp4|m4v|mov|webm|mkv|avi|mp3|m4a|aac|wav|ogg|flac)$').hasMatch(path);
+    return RegExp(r'\.(mp4|m4v|mov|webm|mkv|avi|flv|3gp|ts|m3u8|mpd|mp3|m4a|aac|wav|ogg|opus|flac)$').hasMatch(path);
   }
 
   Future<void> _startDownload(String url) async {
     final uri = Uri.tryParse(url);
     if (uri == null || !{'http', 'https'}.contains(uri.scheme) || uri.host.isEmpty) {
-      if (mounted) setState(() => statusMessage = 'Enter a valid direct HTTP or HTTPS media link.');
+      if (mounted) setState(() => statusMessage = 'Enter a valid public video/audio page or direct media link.');
       return;
     }
-    // Resolve the URL with the real yt-dlp extractor before showing format choices.
-    // This prevents the UI from pretending a webpage is a downloadable media file.
+    // Resolve supported public pages and direct media links with the bundled yt-dlp engine.
     VideoInfo mediaInfo;
     try {
       await _ensureExtractor();
       mediaInfo = await youtubeDL.getVideoInfo(url);
     } catch (error) {
-      if (mounted) setState(() => statusMessage = 'Could not inspect this media URL: $error');
+      if (mounted) setState(() => statusMessage = 'Could not inspect this link. It may be unsupported, unavailable, or require sign-in. $error');
       return;
     }
     final availableHeights = (mediaInfo.formats ?? const [])
@@ -320,7 +327,9 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
   }
 
   Future<void> _download(DownloadItem item) async {
-    item.cancelToken = CancelToken();
+    item.cancelRequested = false;
+    item.processId = null;
+    StreamSubscription? progressSubscription;
     try {
       final dir = await getApplicationDocumentsDirectory();
       final folder = Directory('${dir.path}/CosmicDownloads');
@@ -329,11 +338,12 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
       if (mounted) setState(() {});
       await _ensureExtractor();
       final processId = 'cosmic_${DateTime.now().microsecondsSinceEpoch}';
+      item.processId = processId;
       final requestedHeight = int.tryParse(item.quality.replaceAll('p', ''));
       final format = requestedHeight == null
           ? 'bestvideo+bestaudio/best'
           : 'bestvideo[height<=$requestedHeight]+bestaudio/best[height<=$requestedHeight]';
-      final progressSubscription = youtubeDL.onProgress.listen((progress) {
+      progressSubscription = youtubeDL.onProgress.listen((progress) {
         if (progress.processId == processId && mounted) {
           setState(() => item.progress = (progress.progress / 100).clamp(0.0, 1.0).toDouble());
         }
@@ -353,7 +363,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
         customOptions: {'--no-warnings': '', '--retries': '5', '--fragment-retries': '5', '--no-part': ''},
       );
       final downloadResult = await youtubeDL.download(request);
-      await progressSubscription.cancel();
+      if (item.cancelRequested) throw StateError('Download cancelled by user.');
       if (downloadResult.status != OperationStatus.success || downloadResult.outputPath == null) {
         throw StateError(downloadResult.errorMessage ?? 'The media extractor could not download this URL.');
       }
@@ -374,62 +384,29 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
         const NotificationDetails(android: AndroidNotificationDetails('cosmic_downloads', 'Downloads', channelDescription: 'Download progress and completion', importance: Importance.high, priority: Priority.high)));
       if (mounted) setState(() => statusMessage = 'Download ready • tap Play in Downloads');
       return;
-    } on DioException catch (e) {
-      item.status = CancelToken.isCancel(e) ? 'Cancelled' : 'Failed';
-      item.error = item.status == 'Failed'
-        ? (e.response?.statusCode != null ? 'HTTP ${e.response!.statusCode}: ${e.message ?? 'Request rejected'}' : (e.message ?? e.type.name))
-        : null;
-      if (mounted) setState(() => statusMessage = item.status == 'Failed' ? 'Download failed: ${item.error}' : 'Download cancelled.');
     } catch (e) {
-      item.status = 'Failed';
-      item.error = e.toString().replaceFirst('Bad state: ', '');
-      if (mounted) setState(() => statusMessage = 'Download failed: ${item.error}');
+      item.status = item.cancelRequested ? 'Cancelled' : 'Failed';
+      item.error = item.status == 'Failed' ? e.toString().replaceFirst('Bad state: ', '') : null;
+      if (mounted) setState(() => statusMessage = item.status == 'Failed' ? 'Download failed: ${item.error}' : 'Download cancelled.');
     } finally {
+      await progressSubscription?.cancel();
+      item.processId = null;
       if (mounted) setState(() { downloading = items.any((e) => e.status == 'Downloading' || e.status == 'Converting to MP3' || e.status == 'Optimizing video'); if (!downloading) showGalaxy = false; });
     }
   }
 
-  Future<void> _downloadSingle(DownloadItem item, String path) async {
-    final response = await dio.download(item.url, path, cancelToken: item.cancelToken,
-      options: Options(followRedirects: true, headers: {'User-Agent': 'Mozilla/5.0 (Linux; Android 15) AppleWebKit/537.36 Chrome/131.0 Mobile Safari/537.36'}),
-      onReceiveProgress: (received, total) {
-        if (total > 0) item.progress = (received / total).clamp(0.0, 1.0).toDouble();
-        if (mounted) setState(() {});
-        notifications.show(item.notificationId, 'Cosmic Download', '${(item.progress * 100).round()}% • ${item.name}',
-          NotificationDetails(android: AndroidNotificationDetails('cosmic_downloads', 'Downloads', channelDescription: 'Download progress and completion', importance: Importance.low, priority: Priority.low, showProgress: true, maxProgress: 100, progress: (item.progress * 100).round())));
-      });
-    if (response.statusCode == null || response.statusCode! < 200 || response.statusCode! >= 300) {
-      throw StateError('The media server returned HTTP ${response.statusCode ?? 'unknown'}.');
-    }
-    final downloaded = File(path);
-    if (!await downloaded.exists() || await downloaded.length() < 12) {
-      throw StateError('The server returned an empty or incomplete file.');
-    }
-    final mime = response.headers.value(Headers.contentTypeHeader)?.toLowerCase() ?? '';
-    if (mime.contains('text/html') || mime.contains('application/json') || mime.contains('text/plain')) {
-      throw StateError('This link returned a webpage or error response, not a media file. Paste a direct video/audio file URL.');
-    }
-    final raf = await downloaded.open();
-    final header = await raf.read(16);
-    await raf.close();
-    final ascii = String.fromCharCodes(header);
-    final isMp4 = header.length >= 8 && ascii.substring(4, 8) == 'ftyp';
-    final isWebm = header.length >= 4 && header[0] == 0x1A && header[1] == 0x45 && header[2] == 0xDF && header[3] == 0xA3;
-    final isRiff = ascii.startsWith('RIFF');
-    final isOgg = ascii.startsWith('OggS');
-    final isFlac = ascii.startsWith('fLaC');
-    final isId3 = ascii.startsWith('ID3');
-    final isMp3Frame = header.length >= 2 && header[0] == 0xFF && (header[1] & 0xE0) == 0xE0;
-    final isAac = header.length >= 2 && header[0] == 0xFF && (header[1] & 0xF6) == 0xF0;
-    final isMedia = isMp4 || isWebm || isRiff || isOgg || isFlac || isId3 || isMp3Frame || isAac;
-    final genericMime = mime.isEmpty || mime.contains('octet-stream') || mime.contains('binary');
-    if (!isMedia && genericMime) {
-      throw StateError('The response is not a recognized audio/video file. Use a direct media-file link.');
+  Future<void> retry(DownloadItem item) async { item.progress = 0; item.cancelRequested = false; item.status = 'Queued'; setState(() {}); await _download(item); }
+  Future<void> cancel(DownloadItem item) async {
+    item.cancelRequested = true;
+    final processId = item.processId;
+    try {
+      if (processId != null) await youtubeDL.cancelDownload(processId: processId);
+      if (mounted) setState(() => statusMessage = 'Cancelling download…');
+    } catch (_) {
+      item.cancelRequested = false;
+      if (mounted) setState(() => statusMessage = 'Could not cancel this download.');
     }
   }
-
-  Future<void> retry(DownloadItem item) async { item.progress = 0; item.status = 'Queued'; setState(() {}); await _download(item); }
-  Future<void> cancel(DownloadItem item) async { item.cancelToken?.cancel('User cancelled'); }
 
   Future<void> chooseVideo() async {
     final result = await FilePicker.platform.pickFiles(type: FileType.video);
@@ -538,7 +515,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     const SizedBox(height: 22),
     const Text('DOWNLOAD FROM A LINK', style: TextStyle(fontWeight: FontWeight.bold, letterSpacing: 1, fontSize: 12)),
     const SizedBox(height: 10),
-    TextField(controller: urlController, keyboardType: TextInputType.url, decoration: const InputDecoration(hintText: 'Paste a direct video or audio URL', prefixIcon: Icon(Icons.link_rounded),)),
+    TextField(controller: urlController, keyboardType: TextInputType.url, decoration: const InputDecoration(hintText: 'Paste a supported public video/audio page or file link', prefixIcon: Icon(Icons.link_rounded),)),
     const SizedBox(height: 10),
     Row(children: [
       Expanded(child: FilledButton.icon(onPressed: startDownload, icon: const Icon(Icons.rocket_launch_rounded), label: const Text('DOWNLOAD'))),
@@ -556,9 +533,9 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     ]),
     const SizedBox(height: 16),
     Container(padding: const EdgeInsets.all(14), decoration: BoxDecoration(color: panel, borderRadius: BorderRadius.circular(16)), child: const Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      Text('Real downloads', style: TextStyle(color: cyan, fontWeight: FontWeight.bold)),
+      Text('Supported media links', style: TextStyle(color: cyan, fontWeight: FontWeight.bold)),
       SizedBox(height: 5),
-      Text('Files are saved to your phone in Downloads/Cosmic Download. Turbo mode verifies every byte-range part and automatically retries with a normal download if the server does not support ranges correctly. Only direct, accessible media-file URLs work; protected social posts and DRM streams cannot be downloaded.', style: TextStyle(color: Colors.white60, fontSize: 12, height: 1.4)),
+      Text('Paste a public page or direct media link supported by the bundled yt-dlp engine. Available formats depend on the source and extractor support can change. Private, sign-in-only, DRM-protected, or otherwise restricted media is not bypassed. Download only media you have permission to save.', style: TextStyle(color: Colors.white60, fontSize: 12, height: 1.4)),
     ])),
   ]);
 
@@ -586,13 +563,13 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     ])),
     if (browserLoading) const LinearProgressIndicator(minHeight: 2, color: cyan),
     Expanded(child: WebViewWidget(controller: browserController)),
-    const Padding(padding: EdgeInsets.all(8), child: Text('Search results open in the selected site. Direct media-file links can be downloaded; protected posts may not be available.', style: TextStyle(color: Colors.white54, fontSize: 10), textAlign: TextAlign.center)),
+    const Padding(padding: EdgeInsets.all(8), child: Text('Paste a supported public post URL on Home to inspect it. Protected or sign-in-only posts may not be available.', style: TextStyle(color: Colors.white54, fontSize: 10), textAlign: TextAlign.center)),
   ]);
 
   Widget _downloads() => ListView(padding: const EdgeInsets.all(18), children: [
     _header(), const SizedBox(height: 20), const Text('DOWNLOAD MISSIONS', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900)),
     const SizedBox(height: 12),
-    if (items.isEmpty) const Padding(padding: EdgeInsets.only(top: 70), child: Center(child: Column(children: [Icon(Icons.rocket_outlined, size: 54, color: violet), SizedBox(height: 12), Text('No missions yet'), Text('Paste a direct media link on Home to begin.', style: TextStyle(color: Colors.white54, fontSize: 12))]))),
+    if (items.isEmpty) const Padding(padding: EdgeInsets.only(top: 70), child: Center(child: Column(children: [Icon(Icons.rocket_outlined, size: 54, color: violet), SizedBox(height: 12), Text('No missions yet'), Text('Paste a supported public media page or file link on Home to begin.', style: TextStyle(color: Colors.white54, fontSize: 12))]))),
     ...items.map((item) => Container(margin: const EdgeInsets.only(bottom: 10), padding: const EdgeInsets.all(14), decoration: BoxDecoration(color: panel, borderRadius: BorderRadius.circular(16)), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
       Row(children: [const Icon(Icons.insert_drive_file_rounded, color: cyan), const SizedBox(width: 9), Expanded(child: Text(item.name, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontWeight: FontWeight.bold))), Text(item.status, style: TextStyle(color: item.status == 'Completed' ? Colors.greenAccent : cyan, fontSize: 11))]),
       const SizedBox(height: 10), LinearProgressIndicator(value: item.progress, backgroundColor: Colors.white12, color: cyan, minHeight: 6, borderRadius: BorderRadius.circular(9)),
