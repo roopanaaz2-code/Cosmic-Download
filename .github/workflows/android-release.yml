@@ -76,9 +76,13 @@ jobs:
       - name: Resolve packages
         run: flutter pub get
       - name: Remove generated template test
-        run: rm -rf test
+        run: |
+          rm -f test/widget_test.dart
+          rmdir test 2>/dev/null || true
       - name: Analyze
         run: flutter analyze --no-pub --no-fatal-infos --no-fatal-warnings
+      - name: Test download output resolution
+        run: flutter test --no-pub test/download_output_resolver_test.dart
       - name: Build release APK
         run: flutter build apk --release
       - name: Upload APK artifact

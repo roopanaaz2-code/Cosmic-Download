@@ -3,6 +3,7 @@ import 'dart:io';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
 import 'package:extractor/extractor.dart';
+import 'package:cosmic_download/download_output_resolver.dart';
 import 'package:ffmpeg_kit_flutter_new_full/ffmpeg_kit.dart';
 import 'package:ffmpeg_kit_flutter_new_full/return_code.dart';
 import 'package:file_picker/file_picker.dart';
@@ -53,7 +54,8 @@ class CosmicApp extends StatelessWidget {
 
 class DownloadItem {
   DownloadItem(this.name, this.url, {this.quality = 'Original', this.audioOnly = false});
-  final String name, url;
+  String name;
+  final String url;
   final String quality;
   final bool audioOnly;
   final int notificationId = DateTime.now().microsecondsSinceEpoch.remainder(2000000000);
@@ -376,9 +378,12 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
       final processId = 'cosmic_${DateTime.now().microsecondsSinceEpoch}';
       item.processId = processId;
       final requestedHeight = int.tryParse(item.quality.replaceAll('p', ''));
-      final format = requestedHeight == null
+      final format = item.audioOnly
+          ? 'bestaudio/best'
+          : requestedHeight == null
           ? 'bestvideo+bestaudio/best'
           : 'bestvideo[height<=$requestedHeight]+bestaudio/best[height<=$requestedHeight]';
+      final filePrefix = 'cosmic_$processId';
       progressSubscription = youtubeDL.onProgress.listen((progress) {
         if (progress.processId == processId && mounted) {
           setState(() => item.progress = (progress.progress / 100).clamp(0.0, 1.0).toDouble());
@@ -389,35 +394,46 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
       final request = DownloadRequest(
         url: item.url,
         outputPath: folder.path,
-        outputTemplate: '%(title).100s.%(ext)s',
+        outputTemplate: '$filePrefix-%(title).100s.%(ext)s',
         format: format,
         extractAudio: item.audioOnly,
         audioFormat: item.audioOnly ? 'mp3' : null,
         audioQuality: item.audioOnly ? 0 : null,
         noPlaylist: true,
         processId: processId,
-        customOptions: {'--no-warnings': '', '--retries': '5', '--fragment-retries': '5', '--no-part': ''},
+        customOptions: {'--retries': '5', '--fragment-retries': '5'},
       );
       final downloadResult = await youtubeDL.download(request);
       if (item.cancelRequested) throw StateError('Download cancelled by user.');
-      if (downloadResult.status != OperationStatus.success || downloadResult.outputPath == null) {
+      if (downloadResult.status != OperationStatus.success) {
         throw StateError(downloadResult.errorMessage ?? 'The media extractor could not download this URL.');
       }
-      final finalPath = downloadResult.outputPath!;
-      final finalFile = File(finalPath);
+      // The extractor returns the literal yt-dlp output template instead of
+      // expanding %(title)s/%(ext)s. Resolve the file created by this job's
+      // unique prefix so successful media can actually be published.
+      final finalFile = await findCompletedMediaFile(folder, filePrefix);
+      if (finalFile == null) {
+        throw StateError('The extractor reported success but no completed video/audio file was found.');
+      }
+      final finalPath = finalFile.path;
       if (!await finalFile.exists() || await finalFile.length() < 12) {
         throw StateError('The extractor reported success, but the media file is missing or empty.');
       }
-      final actualName = finalFile.uri.pathSegments.isNotEmpty ? finalFile.uri.pathSegments.last : item.name;
+      final actualName = finalFile.path.split(Platform.pathSeparator).last;
       item.status = 'Publishing to phone storage';
       if (mounted) setState(() {});
       item.path = finalPath;
       item.savedLocation = await _publishToDownloads(finalPath, actualName);
+      item.name = actualName;
       item.progress = 1;
       item.status = 'Completed';
       if (sound) SystemSound.play(SystemSoundType.alert);
-      await notifications.show(item.notificationId, 'Mission completed!', '$actualName is ready in Downloads/Cosmic Download.',
-        const NotificationDetails(android: AndroidNotificationDetails('cosmic_downloads', 'Downloads', channelDescription: 'Download progress and completion', importance: Importance.high, priority: Priority.high)));
+      try {
+        await notifications.show(item.notificationId, 'Mission completed!', '$actualName is ready in Downloads/Cosmic Download.',
+          const NotificationDetails(android: AndroidNotificationDetails('cosmic_downloads', 'Downloads', channelDescription: 'Download progress and completion', importance: Importance.high, priority: Priority.high)));
+      } catch (error, stackTrace) {
+        debugPrint('Could not show the completion notification: $error\n$stackTrace');
+      }
       if (mounted) setState(() => statusMessage = 'Download ready • tap Play in Downloads');
       return;
     } catch (e) {
