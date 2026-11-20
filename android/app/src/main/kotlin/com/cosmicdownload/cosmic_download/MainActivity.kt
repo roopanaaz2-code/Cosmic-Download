@@ -6,8 +6,10 @@ import android.content.pm.PackageManager
 import android.media.MediaScannerConnection
 import android.net.Uri
 import android.os.Build
+import android.os.Bundle
 import android.os.Environment
 import android.provider.MediaStore
+import android.util.Log
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import io.flutter.embedding.android.FlutterActivity
@@ -19,9 +21,18 @@ import java.io.FileOutputStream
 
 class MainActivity : FlutterActivity() {
     private val channelName = "cosmic_download/storage"
+    private val diagnosticsChannelName = "cosmic_download/diagnostics"
     private val permissionRequestCode = 804
     private var pendingSave: Triple<String, String, String>? = null
     private var pendingResult: MethodChannel.Result? = null
+    private val diagnosticsPreferences by lazy {
+        getSharedPreferences("cosmic_download_diagnostics", MODE_PRIVATE)
+    }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        installDiagnosticExceptionHandler()
+    }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -53,6 +64,77 @@ class MainActivity : FlutterActivity() {
                     )
                 }
             }
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, diagnosticsChannelName)
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "recordStage" -> {
+                        val stage = call.argument<String>("stage")
+                        if (stage.isNullOrBlank()) {
+                            result.error("INVALID_STAGE", "Diagnostic stage is empty.", null)
+                        } else {
+                            val saved = diagnosticsPreferences.edit()
+                                .putString("stage", stage)
+                                .putLong("stageTime", System.currentTimeMillis())
+                                .commit()
+                            if (saved) result.success(null)
+                            else result.error("DIAGNOSTIC_WRITE_FAILED", "Could not save diagnostic stage.", null)
+                        }
+                    }
+                    "clearStage" -> {
+                        diagnosticsPreferences.edit().remove("stage").remove("stageTime").commit()
+                        result.success(null)
+                    }
+                    "consumePreviousFailure" -> {
+                        val failure = diagnosticsPreferences.getString("crash", null)
+                        val failureStage = diagnosticsPreferences.getString("crashStage", null)
+                        val activeStage = diagnosticsPreferences.getString("stage", null)
+                        val snapshot = if (failure != null || failureStage != null || activeStage != null) {
+                            mapOf(
+                                "stage" to (failureStage ?: activeStage ?: "unknown"),
+                                "exception" to (failure ?: ""),
+                                "manufacturer" to Build.MANUFACTURER,
+                                "model" to Build.MODEL,
+                                "androidVersion" to Build.VERSION.RELEASE,
+                                "sdk" to Build.VERSION.SDK_INT.toString(),
+                            )
+                        } else null
+                        diagnosticsPreferences.edit()
+                            .remove("crash")
+                            .remove("crashStage")
+                            .remove("stage")
+                            .remove("stageTime")
+                            .commit()
+                        result.success(snapshot)
+                    }
+                    else -> result.notImplemented()
+                }
+            }
+    }
+
+    private fun installDiagnosticExceptionHandler() {
+        synchronized(MainActivity::class.java) {
+            if (diagnosticHandlerInstalled) return
+            val previousHandler = Thread.getDefaultUncaughtExceptionHandler()
+            Thread.setDefaultUncaughtExceptionHandler { thread, error ->
+                try {
+                    val stage = diagnosticsPreferences.getString("stage", "unknown")
+                    val stack = Log.getStackTraceString(error).take(16000)
+                    diagnosticsPreferences.edit()
+                        .putString("crash", stack)
+                        .putString("crashStage", stage)
+                        .commit()
+                } catch (_: Throwable) {
+                    // Diagnostics must never prevent Android's original crash handler.
+                }
+                previousHandler?.uncaughtException(thread, error)
+            }
+            diagnosticHandlerInstalled = true
+        }
+    }
+
+    companion object {
+        @Volatile
+        private var diagnosticHandlerInstalled = false
     }
 
     private fun saveWithMediaStore(

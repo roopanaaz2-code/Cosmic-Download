@@ -22,18 +22,28 @@ const violet = Color(0xFF9B78FF);
 
 final notifications = FlutterLocalNotificationsPlugin();
 const storageChannel = MethodChannel('cosmic_download/storage');
+const diagnosticsChannel = MethodChannel('cosmic_download/diagnostics');
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  Map<String, dynamic>? previousFailure;
+  try {
+    previousFailure = await diagnosticsChannel.invokeMapMethod<String, dynamic>(
+      'consumePreviousFailure',
+    );
+  } catch (error) {
+    debugPrint('Could not load previous crash diagnostics: $error');
+  }
   const android = AndroidInitializationSettings('@mipmap/ic_launcher');
   await notifications.initialize(const InitializationSettings(android: android));
   final androidNotifications = notifications.resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>();
   await androidNotifications?.requestNotificationsPermission();
-  runApp(const CosmicApp());
+  runApp(CosmicApp(previousFailure: previousFailure));
 }
 
 class CosmicApp extends StatelessWidget {
-  const CosmicApp({super.key});
+  const CosmicApp({super.key, this.previousFailure});
+  final Map<String, dynamic>? previousFailure;
   @override
   Widget build(BuildContext context) => MaterialApp(
     title: 'Cosmic Download',
@@ -48,7 +58,7 @@ class CosmicApp extends StatelessWidget {
         border: OutlineInputBorder(borderRadius: BorderRadius.circular(16), borderSide: BorderSide.none),
       ),
     ),
-    home: const HomePage(),
+    home: HomePage(previousFailure: previousFailure),
   );
 }
 
@@ -69,7 +79,8 @@ class DownloadItem {
 }
 
 class HomePage extends StatefulWidget {
-  const HomePage({super.key});
+  const HomePage({super.key, this.previousFailure});
+  final Map<String, dynamic>? previousFailure;
   @override
   State<HomePage> createState() => _HomePageState();
 }
@@ -84,6 +95,22 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
   bool extractorInitialized = false;
   Future<void>? _extractorInitialization;
   bool resolvingLink = false;
+
+  Future<void> _recordDownloadStage(String stage) async {
+    try {
+      await diagnosticsChannel.invokeMethod<void>('recordStage', {'stage': stage});
+    } catch (error) {
+      debugPrint('Could not record download stage "$stage": $error');
+    }
+  }
+
+  Future<void> _clearDownloadStage() async {
+    try {
+      await diagnosticsChannel.invokeMethod<void>('clearStage');
+    } catch (error) {
+      debugPrint('Could not clear download stage: $error');
+    }
+  }
 
   Future<void> _ensureExtractor() async {
     if (extractorInitialized) return;
@@ -121,6 +148,12 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
   @override
   void initState() {
     super.initState();
+    final previousFailure = widget.previousFailure;
+    if (previousFailure != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _showPreviousFailure(previousFailure);
+      });
+    }
     browserController = WebViewController()
       ..setJavaScriptMode(JavaScriptMode.unrestricted)
       ..setNavigationDelegate(NavigationDelegate(
@@ -135,6 +168,50 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
         },
       ))
       ..loadRequest(Uri.parse('https://www.google.com'));
+  }
+
+  void _showPreviousFailure(Map<String, dynamic> failure) {
+    final stage = failure['stage']?.toString() ?? 'unknown';
+    final device = '${failure['manufacturer'] ?? ''} ${failure['model'] ?? ''}'.trim();
+    final android = '${failure['androidVersion'] ?? 'unknown'} (API ${failure['sdk'] ?? 'unknown'})';
+    final exception = failure['exception']?.toString().trim() ?? '';
+    final diagnostic = [
+      'Last download stopped at: $stage',
+      'Device: ${device.isEmpty ? 'unknown' : device}',
+      'Android: $android',
+      if (exception.isNotEmpty) '\nJava exception:\n$exception',
+    ].join('\n');
+
+    showDialog<void>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Previous download crash details'),
+        content: SingleChildScrollView(
+          child: SelectableText(
+            '$diagnostic\n\nCopy this report and send it to support. Review it first and remove any private URL tokens.',
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('Close'),
+          ),
+          FilledButton.icon(
+            onPressed: () async {
+              await Clipboard.setData(ClipboardData(text: diagnostic));
+              if (dialogContext.mounted) Navigator.pop(dialogContext);
+              if (mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('Crash details copied. Review before sharing.')),
+                );
+              }
+            },
+            icon: const Icon(Icons.copy_rounded),
+            label: const Text('Copy details'),
+          ),
+        ],
+      ),
+    );
   }
 
   @override
@@ -202,8 +279,11 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     if (mounted) setState(() { resolvingLink = true; statusMessage = 'Inspecting media link…'; });
     try {
       // Resolve supported public pages and direct media links with the bundled yt-dlp engine.
+      await _recordDownloadStage('Starting native yt-dlp and FFmpeg initialization');
       await _ensureExtractor();
+      await _recordDownloadStage('Native engine initialized; requesting link metadata');
       final mediaInfo = await youtubeDL.getVideoInfo(url);
+      await _clearDownloadStage();
       final heightSet = <int>{};
       for (final format in mediaInfo.formats ?? const <VideoFormat?>[]) {
         final height = format?.height;
@@ -216,6 +296,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
       ].toSet().toList();
 
       if (!mounted) return;
+      await _recordDownloadStage('Showing the video/audio format picker');
       final choice = await showModalBottomSheet<Map<String, dynamic>>(
         context: context, isScrollControlled: true, backgroundColor: panel,
         shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(26))),
@@ -258,7 +339,11 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
           )));
         },
       );
-      if (choice == null || !mounted) return;
+      if (choice == null || !mounted) {
+        await _clearDownloadStage();
+        return;
+      }
+      await _recordDownloadStage('Starting the selected video/audio download');
       final quality = choice['quality'] as String;
       final audioOnly = choice['mp3'] as bool;
       final originalName = (mediaInfo.title?.trim().isNotEmpty == true ? mediaInfo.title!.trim() : fileNameFrom(url)).replaceAll(RegExp(r'[^a-zA-Z0-9._ -]'), '_');
@@ -282,6 +367,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
       }
       await _download(item);
     } catch (error, stackTrace) {
+      await _clearDownloadStage();
       debugPrint('Download setup failed: $error\n$stackTrace');
       if (mounted) {
         final detail = error.toString().replaceFirst('Bad state: ', '');
@@ -369,6 +455,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     item.processId = null;
     StreamSubscription? progressSubscription;
     try {
+      await _recordDownloadStage('Preparing the yt-dlp download engine');
       final dir = await getApplicationDocumentsDirectory();
       final folder = Directory('${dir.path}/CosmicDownloads');
       if (!await folder.exists()) await folder.create(recursive: true);
@@ -441,6 +528,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
       item.error = item.status == 'Failed' ? e.toString().replaceFirst('Bad state: ', '') : null;
       if (mounted) setState(() => statusMessage = item.status == 'Failed' ? 'Download failed: ${item.error}' : 'Download cancelled.');
     } finally {
+      await _clearDownloadStage();
       await progressSubscription?.cancel();
       item.processId = null;
       if (mounted) setState(() { downloading = items.any((e) => e.status == 'Downloading' || e.status == 'Converting to MP3' || e.status == 'Optimizing video'); if (!downloading) showGalaxy = false; });
