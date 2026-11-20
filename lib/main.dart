@@ -3,9 +3,10 @@ import 'dart:io';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
 import 'package:extractor/extractor.dart';
+import 'package:cosmic_download/download_format_selector.dart';
 import 'package:cosmic_download/download_output_resolver.dart';
-import 'package:ffmpeg_kit_flutter_new_full/ffmpeg_kit.dart';
-import 'package:ffmpeg_kit_flutter_new_full/return_code.dart';
+import 'package:cosmic_download/shared_link_parser.dart';
+import 'package:cosmic_download/youtube_403_detector.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -23,6 +24,7 @@ const violet = Color(0xFF9B78FF);
 final notifications = FlutterLocalNotificationsPlugin();
 const storageChannel = MethodChannel('cosmic_download/storage');
 const diagnosticsChannel = MethodChannel('cosmic_download/diagnostics');
+const shareChannel = MethodChannel('cosmic_download/share');
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -90,7 +92,8 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
   final browserAddressController = TextEditingController();
   late final WebViewController browserController;
   String browserPlatform = 'Web';
-  bool browserLoading = false, converting = false;
+  bool browserLoading = false;
+  bool hasSharedLink = false;
   final youtubeDL = YoutubeDLFlutter.instance;
   bool extractorInitialized = false;
   Future<void>? _extractorInitialization;
@@ -137,6 +140,30 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     }
     extractorInitialized = true;
   }
+
+  String _youtube403Help(String details) =>
+      'Updating yt-dlp and retrying did not make this YouTube link downloadable. A 403/SABR failure may require a YouTube proof-of-origin token or sign-in, or the video may block automated downloads. Cosmic Download does not bypass private or protected access. Details: $details';
+
+  Future<void> _updateYtDlpStable() async {
+    final result = await youtubeDL.updateYoutubeDL(channel: UpdateChannel.stable);
+    if (result.status != OperationStatus.success) {
+      throw StateError(result.errorMessage ?? 'Could not update the embedded yt-dlp engine.');
+    }
+  }
+
+  Future<VideoInfo> _getVideoInfoWithRecovery(String url) async {
+    try {
+      return await youtubeDL.getVideoInfo(url);
+    } catch (error) {
+      if (!isYoutube403(url, error.toString())) rethrow;
+      try {
+        await _updateYtDlpStable();
+        return await youtubeDL.getVideoInfo(url);
+      } catch (recoveryError) {
+        throw StateError(_youtube403Help(recoveryError.toString()));
+      }
+    }
+  }
   final items = <DownloadItem>[];
   final audio = AudioPlayer();
   bool sound = false, downloading = false, showGalaxy = false;
@@ -148,6 +175,12 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
   @override
   void initState() {
     super.initState();
+    shareChannel.setMethodCallHandler((call) async {
+      if (call.method == 'sharedLink') {
+        await _receiveSharedText(call.arguments as String?);
+      }
+    });
+    WidgetsBinding.instance.addPostFrameCallback((_) => _consumeInitialSharedLink());
     final previousFailure = widget.previousFailure;
     if (previousFailure != null) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -157,8 +190,12 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     browserController = WebViewController()
       ..setJavaScriptMode(JavaScriptMode.unrestricted)
       ..setNavigationDelegate(NavigationDelegate(
-        onPageStarted: (_) { if (mounted) setState(() => browserLoading = true); },
-        onPageFinished: (_) { if (mounted) setState(() => browserLoading = false); },
+        onPageStarted: (url) {
+          if (mounted) setState(() { browserLoading = true; browserAddressController.text = url; });
+        },
+        onPageFinished: (url) {
+          if (mounted) setState(() { browserLoading = false; browserAddressController.text = url; });
+        },
         onNavigationRequest: (request) {
           if (_isDirectMediaUrl(request.url)) {
             _startDownload(request.url);
@@ -168,6 +205,36 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
         },
       ))
       ..loadRequest(Uri.parse('https://www.google.com'));
+  }
+
+  Future<void> _consumeInitialSharedLink() async {
+    try {
+      final text = await shareChannel.invokeMethod<String>('consumeInitialSharedLink');
+      if (text != null) await _receiveSharedText(text);
+    } on PlatformException catch (error) {
+      debugPrint('Could not read the initial shared link: $error');
+    }
+  }
+
+  Future<void> _receiveSharedText(String? text) async {
+    if (text == null || !mounted) return;
+    final candidate = firstHttpUrl(text);
+    if (candidate == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('The shared item did not contain a web link.')),
+      );
+      return;
+    }
+    if (hasSharedLink && urlController.text.trim() == candidate) return;
+    setState(() {
+      urlController.text = candidate;
+      hasSharedLink = true;
+      statusMessage = 'Shared link ready — choose a format and tap Download.';
+      tab = 0;
+    });
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Link received. Tap DOWNLOAD SHARED LINK to continue.')),
+    );
   }
 
   void _showPreviousFailure(Map<String, dynamic> failure) {
@@ -216,6 +283,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
 
   @override
   void dispose() {
+    shareChannel.setMethodCallHandler(null);
     urlController.dispose();
     browserAddressController.dispose();
     audio.dispose();
@@ -278,22 +346,22 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     }
     if (mounted) setState(() { resolvingLink = true; statusMessage = 'Inspecting media link…'; });
     try {
+      final directMedia = _isDirectMediaUrl(url);
       // Resolve supported public pages and direct media links with the bundled yt-dlp engine.
       await _recordDownloadStage('Starting native yt-dlp and FFmpeg initialization');
       await _ensureExtractor();
       await _recordDownloadStage('Native engine initialized; requesting link metadata');
-      final mediaInfo = await youtubeDL.getVideoInfo(url);
+      final mediaInfo = directMedia ? null : await _getVideoInfoWithRecovery(url);
       await _clearDownloadStage();
       final heightSet = <int>{};
-      for (final format in mediaInfo.formats ?? const <VideoFormat?>[]) {
+      for (final format in mediaInfo?.formats ?? const <VideoFormat?>[]) {
         final height = format?.height;
         if (height != null && height > 0) heightSet.add(height);
       }
       final availableHeights = heightSet.toList()..sort((a, b) => b.compareTo(a));
-      final qualityOptions = <String>[
-        'Best available',
-        ...availableHeights.map((height) => '${height}p'),
-      ].toSet().toList();
+      final qualityOptions = directMedia
+          ? <String>['Original format']
+          : <String>['Most compatible MP4', ...availableHeights.map((height) => '${height}p')].toSet().toList();
 
       if (!mounted) return;
       await _recordDownloadStage('Showing the video/audio format picker');
@@ -310,7 +378,12 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
               const SizedBox(height: 18),
               const Text('CHOOSE DOWNLOAD FORMAT', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w900, letterSpacing: .8)),
               const SizedBox(height: 5),
-              const Text('Choose the best available resolution or extract audio as MP3.', style: TextStyle(color: Colors.white60, fontSize: 12)),
+              Text(
+                directMedia
+                    ? 'This is a direct media file. It will be downloaded in the source format; use MP3 audio-only if you want an audio conversion.'
+                    : 'Most compatible prefers H.264 video + AAC audio in MP4 for wider Android player support. Choose a resolution cap or extract MP3 audio.',
+                style: const TextStyle(color: Colors.white60, fontSize: 12),
+              ),
               const SizedBox(height: 16),
               Wrap(spacing: 8, runSpacing: 8, children: qualityOptions.map((q) =>
                 ChoiceChip(label: Text(q), selected: !mp3 && selected == q,
@@ -334,7 +407,12 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
                 )),
               )),
               const SizedBox(height: 8),
-              const Text('Resolution options are limited to formats provided by the source.', style: TextStyle(color: Colors.white38, fontSize: 10)),
+              Text(
+                directMedia
+                    ? 'Direct media links have a fixed source format; their codec cannot be changed without re-encoding.'
+                    : 'Compatible codecs and resolutions depend on what each source provides. A lower resolution may be selected to keep the file playable on more devices.',
+                style: const TextStyle(color: Colors.white38, fontSize: 10),
+              ),
             ]),
           )));
         },
@@ -346,12 +424,23 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
       await _recordDownloadStage('Starting the selected video/audio download');
       final quality = choice['quality'] as String;
       final audioOnly = choice['mp3'] as bool;
-      final originalName = (mediaInfo.title?.trim().isNotEmpty == true ? mediaInfo.title!.trim() : fileNameFrom(url)).replaceAll(RegExp(r'[^a-zA-Z0-9._ -]'), '_');
+      final mediaTitle = mediaInfo?.title?.trim();
+      final originalName = (mediaTitle?.isNotEmpty == true ? mediaTitle! : fileNameFrom(url)).replaceAll(RegExp(r'[^a-zA-Z0-9._ -]'), '_');
       final base = originalName.replaceFirst(RegExp(r'\.[^.]+$'), '');
-      final outputName = audioOnly ? '$base.mp3' : '$base-${quality == 'Best available' ? 'best' : quality}.mp4';
+      final outputQuality = switch (quality) {
+        'Most compatible MP4' => 'compatible',
+        'Original format' => 'source',
+        _ => quality,
+      };
+      final outputName = audioOnly
+          ? '$base.mp3'
+          : directMedia
+              ? '$base-source-media'
+              : '$base-$outputQuality.mp4';
       final item = DownloadItem(outputName, url, quality: quality, audioOnly: audioOnly);
       setState(() {
         resolvingLink = false;
+        hasSharedLink = false;
         items.insert(0, item);
         downloading = true;
         showGalaxy = true;
@@ -415,39 +504,19 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     await browserController.loadRequest(Uri.parse(target));
   }
 
-  Future<void> convertToMp3() async {
-    if (converting) return;
-    final picked = await FilePicker.platform.pickFiles(type: FileType.video);
-    final input = picked?.files.single.path;
-    if (input == null) return;
-    setState(() { converting = true; statusMessage = 'Converting audio…'; });
-    try {
-      final docs = await getApplicationDocumentsDirectory();
-      final folder = Directory('${docs.path}/CosmicDownloads');
-      if (!await folder.exists()) await folder.create(recursive: true);
-      final base = input.split(Platform.pathSeparator).last.replaceFirst(RegExp(r'\.[^.]+$'), '');
-      final output = '${folder.path}/$base.mp3';
-      String quote(String value) => '"${value.replaceAll('"', r'\"')}"';
-      final session = await FFmpegKit.execute('-y -i ${quote(input)} -vn -c:a libmp3lame -b:a 192k ${quote(output)}');
-      final code = await session.getReturnCode();
-      if (ReturnCode.isSuccess(code) && await File(output).exists()) {
-        final item = DownloadItem('$base.mp3', 'local-conversion://$base');
-        item.path = output;
-        item.savedLocation = await _publishToDownloads(output, '$base.mp3');
-        item.progress = 1; item.status = 'Completed';
-        if (mounted) setState(() { items.insert(0, item); statusMessage = 'MP3 conversion completed'; tab = 1; });
-        await notifications.show(item.notificationId, 'MP3 conversion completed', '$base.mp3 is ready.',
-          const NotificationDetails(android: AndroidNotificationDetails('cosmic_downloads', 'Downloads', channelDescription: 'Download progress and completion', importance: Importance.high, priority: Priority.high)));
-        if (sound) SystemSound.play(SystemSoundType.alert);
-      } else {
-        final logs = await session.getOutput() ?? 'Unsupported or protected audio stream.';
-        if (mounted) setState(() => statusMessage = 'Conversion failed: ${logs.substring(0, (logs.length > 90 ? 90 : logs.length))}');
+  Future<void> downloadCurrentBrowserPage() async {
+    final currentUrl = await browserController.currentUrl();
+    final uri = currentUrl == null ? null : Uri.tryParse(currentUrl);
+    if (currentUrl == null || uri == null || !{'http', 'https'}.contains(uri.scheme) || uri.host.isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Open a public video page first.')),
+        );
       }
-    } catch (_) {
-      if (mounted) setState(() => statusMessage = 'Could not convert this video to MP3.');
-    } finally {
-      if (mounted) setState(() => converting = false);
+      return;
     }
+    urlController.text = currentUrl;
+    await _startDownload(currentUrl);
   }
 
   Future<void> _download(DownloadItem item) async {
@@ -462,38 +531,70 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
       item.status = 'Preparing media extractor';
       if (mounted) setState(() {});
       await _ensureExtractor();
-      final processId = 'cosmic_${DateTime.now().microsecondsSinceEpoch}';
+      var processId = 'cosmic_${DateTime.now().microsecondsSinceEpoch}';
       item.processId = processId;
-      final requestedHeight = int.tryParse(item.quality.replaceAll('p', ''));
-      final format = item.audioOnly
-          ? 'bestaudio/best'
-          : requestedHeight == null
-          ? 'bestvideo+bestaudio/best'
-          : 'bestvideo[height<=$requestedHeight]+bestaudio/best[height<=$requestedHeight]';
-      final filePrefix = 'cosmic_$processId';
+      final format = mediaFormatSelector(
+        audioOnly: item.audioOnly,
+        quality: item.quality,
+        directMedia: _isDirectMediaUrl(item.url),
+      );
+      var filePrefix = 'cosmic_$processId';
       progressSubscription = youtubeDL.onProgress.listen((progress) {
-        if (progress.processId == processId && mounted) {
+        if (progress.processId == item.processId && mounted) {
           setState(() => item.progress = (progress.progress / 100).clamp(0.0, 1.0).toDouble());
         }
       });
       item.status = 'Downloading';
       if (mounted) setState(() {});
-      final request = DownloadRequest(
+      DownloadRequest makeRequest(String id) => DownloadRequest(
         url: item.url,
         outputPath: folder.path,
-        outputTemplate: '$filePrefix-%(title).100s.%(ext)s',
+        outputTemplate: 'cosmic_$id-%(title).100s.%(ext)s',
         format: format,
         extractAudio: item.audioOnly,
         audioFormat: item.audioOnly ? 'mp3' : null,
         audioQuality: item.audioOnly ? 0 : null,
         noPlaylist: true,
-        processId: processId,
-        customOptions: {'--retries': '5', '--fragment-retries': '5'},
+        processId: id,
+        customOptions: {
+          '--retries': '5',
+          '--fragment-retries': '5',
+          if (!item.audioOnly) '--merge-output-format': 'mp4',
+        },
       );
-      final downloadResult = await youtubeDL.download(request);
+      var downloadResult = await youtubeDL.download(makeRequest(processId));
       if (item.cancelRequested) throw StateError('Download cancelled by user.');
+      if (downloadResult.status != OperationStatus.success &&
+          isYoutube403(item.url, downloadResult.errorMessage ?? '')) {
+        item.status = 'Updating yt-dlp';
+        if (mounted) setState(() {});
+        try {
+          await _updateYtDlpStable();
+        } catch (updateError) {
+          throw StateError(_youtube403Help(
+            'Automatic stable update failed: $updateError. ${downloadResult.errorMessage ?? ''}',
+          ));
+        }
+        processId = '${processId}_updated';
+        item.processId = processId;
+        filePrefix = 'cosmic_$processId';
+        item.status = 'Retrying with updated yt-dlp';
+        if (mounted) setState(() {});
+        downloadResult = await youtubeDL.download(makeRequest(processId));
+        if (item.cancelRequested) throw StateError('Download cancelled by user.');
+      }
       if (downloadResult.status != OperationStatus.success) {
-        throw StateError(downloadResult.errorMessage ?? 'The media extractor could not download this URL.');
+        final detail = downloadResult.errorMessage ?? 'The media extractor could not download this URL.';
+        if (isYoutube403(item.url, detail)) {
+          throw StateError(_youtube403Help(detail));
+        }
+        final lowerDetail = detail.toLowerCase();
+        if (!item.audioOnly &&
+            (lowerDetail.contains('requested format is not available') ||
+                lowerDetail.contains('requested format not available'))) {
+          throw StateError('This source did not offer a compatible H.264/AAC MP4 at the selected quality. Try a lower resolution; if none is available, that source cannot provide a broadly compatible format.');
+        }
+        throw StateError(detail);
       }
       // The extractor returns the literal yt-dlp output template instead of
       // expanding %(title)s/%(ext)s. Resolve the file created by this job's
@@ -531,7 +632,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
       await _clearDownloadStage();
       await progressSubscription?.cancel();
       item.processId = null;
-      if (mounted) setState(() { downloading = items.any((e) => e.status == 'Downloading' || e.status == 'Converting to MP3' || e.status == 'Optimizing video'); if (!downloading) showGalaxy = false; });
+      if (mounted) setState(() { downloading = items.any((e) => e.status == 'Downloading' || e.status == 'Updating yt-dlp' || e.status == 'Optimizing video'); if (!downloading) showGalaxy = false; });
     }
   }
 
@@ -655,7 +756,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     const SizedBox(height: 22),
     const Text('DOWNLOAD FROM A LINK', style: TextStyle(fontWeight: FontWeight.bold, letterSpacing: 1, fontSize: 12)),
     const SizedBox(height: 10),
-    TextField(controller: urlController, keyboardType: TextInputType.url, decoration: const InputDecoration(hintText: 'Paste a supported public video/audio page or file link', prefixIcon: Icon(Icons.link_rounded),)),
+    TextField(controller: urlController, keyboardType: TextInputType.url, decoration: const InputDecoration(hintText: 'Paste a public video link, or Share it to Cosmic Download', prefixIcon: Icon(Icons.link_rounded),)),
     const SizedBox(height: 10),
     Row(children: [
       Expanded(child: FilledButton.icon(
@@ -663,7 +764,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
         icon: resolvingLink
             ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
             : const Icon(Icons.rocket_launch_rounded),
-        label: Text(resolvingLink ? 'INSPECTING LINK…' : 'DOWNLOAD'),
+        label: Text(resolvingLink ? 'INSPECTING LINK…' : hasSharedLink ? 'DOWNLOAD SHARED LINK' : 'DOWNLOAD'),
       )),
       const SizedBox(width: 8),
       OutlinedButton(onPressed: openBrowserSearch, child: const Icon(Icons.search_rounded)),
@@ -675,13 +776,20 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
       _tile(Icons.download_for_offline_rounded, 'Download manager', 'Track your missions', () => setState(() => tab = 1)),
       _tile(Icons.video_library_rounded, 'Video player', 'Play local videos', chooseVideo),
       _tile(Icons.library_music_rounded, 'Music player', 'Play local audio', playAudio),
-      _tile(Icons.graphic_eq_rounded, 'MP3 converter', converting ? 'Converting…' : 'Extract audio from video', convertToMp3),
+      _tile(Icons.share_rounded, 'Share from apps', 'Share link → Cosmic Download', () => showDialog<void>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          title: const Text('Download from another app'),
+          content: const Text('In a social app, open the post menu, tap Share, then choose Cosmic Download. The link will appear here; review it and tap DOWNLOAD SHARED LINK. In Cosmic Browser, use DOWNLOAD THIS PAGE.'),
+          actions: [TextButton(onPressed: () => Navigator.pop(dialogContext), child: const Text('OK'))],
+        ),
+      )),
     ]),
     const SizedBox(height: 16),
     Container(padding: const EdgeInsets.all(14), decoration: BoxDecoration(color: panel, borderRadius: BorderRadius.circular(16)), child: const Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
       Text('Supported media links', style: TextStyle(color: cyan, fontWeight: FontWeight.bold)),
       SizedBox(height: 5),
-      Text('Paste a public page or direct media link supported by the bundled yt-dlp engine. Available formats depend on the source and extractor support can change. Private, sign-in-only, DRM-protected, or otherwise restricted media is not bypassed. Download only media you have permission to save.', style: TextStyle(color: Colors.white60, fontSize: 12, height: 1.4)),
+      Text('Paste a public page, share it from another app, or open it in Cosmic Browser. Available formats depend on the source and extractor support can change. Private, sign-in-only, DRM-protected, or otherwise restricted media is not bypassed. Download only media you have permission to save.', style: TextStyle(color: Colors.white60, fontSize: 12, height: 1.4)),
     ])),
   ]);
 
@@ -709,7 +817,15 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     ])),
     if (browserLoading) const LinearProgressIndicator(minHeight: 2, color: cyan),
     Expanded(child: WebViewWidget(controller: browserController)),
-    const Padding(padding: EdgeInsets.all(8), child: Text('Paste a supported public post URL on Home to inspect it. Protected or sign-in-only posts may not be available.', style: TextStyle(color: Colors.white54, fontSize: 10), textAlign: TextAlign.center)),
+    Padding(padding: const EdgeInsets.fromLTRB(12, 6, 12, 8), child: Column(mainAxisSize: MainAxisSize.min, children: [
+      const Text('Some sites block embedded browsers or require sign-in. Sharing a public post link from the social app may work better.', style: TextStyle(color: Colors.white54, fontSize: 10), textAlign: TextAlign.center),
+      const SizedBox(height: 7),
+      SizedBox(width: double.infinity, child: FilledButton.icon(
+        onPressed: browserLoading ? null : downloadCurrentBrowserPage,
+        icon: const Icon(Icons.download_rounded),
+        label: const Text('DOWNLOAD THIS PAGE'),
+      )),
+    ])),
   ]);
 
   Widget _downloads() => ListView(padding: const EdgeInsets.all(18), children: [

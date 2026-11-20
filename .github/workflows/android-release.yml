@@ -96,6 +96,8 @@ jobs:
           grep -q 'targetSdk = 35' android/app/build.gradle.kts
           grep -q 'isMinifyEnabled = false' android/app/build.gradle.kts
           grep -Fq -- '-keep class org.apache.commons.compress.** { *; }' android/app/proguard-rules.pro
+          grep -q 'android.intent.action.SEND' android/app/src/main/AndroidManifest.xml
+          grep -q 'android:mimeType="text/plain"' android/app/src/main/AndroidManifest.xml
           printf '\ndependencies {\n    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")\n}\n' >> android/app/build.gradle.kts
       - name: Configure native library packaging
         run: |
@@ -109,15 +111,17 @@ jobs:
           rmdir test 2>/dev/null || true
       - name: Analyze
         run: flutter analyze --no-pub --no-fatal-infos --no-fatal-warnings
-      - name: Test download output resolution
-        run: flutter test --no-pub test/download_output_resolver_test.dart
+      - name: Test app regression suite
+        run: flutter test --no-pub
       - name: Build release APK
-        run: flutter build apk --release
+        run: flutter build apk --release --split-per-abi --target-platform android-arm,android-arm64
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: cosmic-download-release-apk
-          path: build/app/outputs/flutter-apk/app-release.apk
+          name: cosmic-download-release-apks
+          path: |
+            build/app/outputs/flutter-apk/app-arm64-v8a-release.apk
+            build/app/outputs/flutter-apk/app-armeabi-v7a-release.apk
           retention-days: 30
       - name: Publish GitHub Release
         if: github.ref == 'refs/heads/main'
@@ -125,5 +129,7 @@ jobs:
         with:
           tag_name: v1.2.${{ github.run_number }}
           name: Cosmic Download v1.2.${{ github.run_number }}
-          files: build/app/outputs/flutter-apk/app-release.apk
+          files: |
+            build/app/outputs/flutter-apk/app-arm64-v8a-release.apk
+            build/app/outputs/flutter-apk/app-armeabi-v7a-release.apk
           generate_release_notes: true

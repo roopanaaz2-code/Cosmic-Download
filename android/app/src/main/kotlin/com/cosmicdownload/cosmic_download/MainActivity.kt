@@ -2,6 +2,7 @@ package com.cosmicdownload.cosmic_download
 
 import android.Manifest
 import android.content.ContentValues
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.media.MediaScannerConnection
 import android.net.Uri
@@ -22,16 +23,27 @@ import java.io.FileOutputStream
 class MainActivity : FlutterActivity() {
     private val channelName = "cosmic_download/storage"
     private val diagnosticsChannelName = "cosmic_download/diagnostics"
+    private val shareChannelName = "cosmic_download/share"
     private val permissionRequestCode = 804
     private var pendingSave: Triple<String, String, String>? = null
     private var pendingResult: MethodChannel.Result? = null
+    private var pendingSharedLink: String? = null
+    private var shareMethodChannel: MethodChannel? = null
     private val diagnosticsPreferences by lazy {
         getSharedPreferences("cosmic_download_diagnostics", MODE_PRIVATE)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        pendingSharedLink = extractSharedLink(intent)
         installDiagnosticExceptionHandler()
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        pendingSharedLink = extractSharedLink(intent)
+        pendingSharedLink?.let { shareMethodChannel?.invokeMethod("sharedLink", it) }
     }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
@@ -109,6 +121,31 @@ class MainActivity : FlutterActivity() {
                     else -> result.notImplemented()
                 }
             }
+        shareMethodChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, shareChannelName)
+        shareMethodChannel?.setMethodCallHandler { call, result ->
+            when (call.method) {
+                "consumeInitialSharedLink" -> {
+                    val link = pendingSharedLink
+                    pendingSharedLink = null
+                    result.success(link)
+                }
+                else -> result.notImplemented()
+            }
+        }
+    }
+
+    private fun extractSharedLink(intent: Intent?): String? {
+        val sharedText = when (intent?.action) {
+            Intent.ACTION_SEND -> intent.getCharSequenceExtra(Intent.EXTRA_TEXT)?.toString()
+            Intent.ACTION_VIEW -> intent.dataString
+            else -> null
+        } ?: return null
+        val candidate = Regex("https?://\\S+", RegexOption.IGNORE_CASE)
+            .find(sharedText)?.value
+            ?.trimEnd('.', ',', ';', '!', '?', ')', ']', '}')
+            ?: return null
+        val uri = Uri.parse(candidate)
+        return candidate.takeIf { uri.scheme in listOf("http", "https") && !uri.host.isNullOrBlank() }
     }
 
     private fun installDiagnosticExceptionHandler() {
